@@ -39,6 +39,7 @@ rollout_tp=${ROLLOUT_TP:-}
 rollout_gpu_mem_util=${ROLLOUT_GPU_MEM_UTIL:-}
 rollout_n=${ROLLOUT_N:-5}
 sp_size=${SP_SIZE:-1}
+attn_implementation=${ATTN_IMPLEMENTATION:-sdpa}
 
 total_epochs=${TOTAL_EPOCHS:-15}
 save_freq=${SAVE_FREQ:-20}
@@ -141,6 +142,7 @@ DATA=(
 
 MODEL=(
     actor_rollout_ref.model.path="$MODEL_PATH"
+    actor_rollout_ref.model.override_config.attn_implementation=${attn_implementation}
     actor_rollout_ref.model.use_remove_padding=True
     actor_rollout_ref.model.enable_gradient_checkpointing=True
 )

@@ -50,6 +50,7 @@ rollout_tp=${ROLLOUT_TP:-2}
 rollout_gpu_mem_util=${ROLLOUT_GPU_MEM_UTIL:-0.55}
 max_num_gen_batches=${MAX_NUM_GEN_BATCHES:-10}
 filter_groups=${FILTER_GROUPS:-True}
+attn_implementation=${ATTN_IMPLEMENTATION:-sdpa}
 
 case "${METHOD}" in
     baseline)
@@ -98,6 +99,7 @@ DATA=(
 
 MODEL=(
     actor_rollout_ref.model.path="${MODEL_PATH}"
+    actor_rollout_ref.model.override_config.attn_implementation=${attn_implementation}
     actor_rollout_ref.model.use_remove_padding=True
     actor_rollout_ref.model.enable_gradient_checkpointing=True
 )
