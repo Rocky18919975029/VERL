@@ -83,6 +83,16 @@ export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
 export TOKENIZERS_PARALLELISM=${TOKENIZERS_PARALLELISM:-false}
 export HYDRA_FULL_ERROR=${HYDRA_FULL_ERROR:-1}
 export PYTHONUNBUFFERED=1
+export WANDB_MODE=${WANDB_MODE:-offline}
+export WANDB_DIR=${WANDB_DIR:-${VERL_WORKDIR}/wandb}
+export WANDB_SILENT=${WANDB_SILENT:-true}
+
+# Uncomment these if all Hugging Face models/tokenizers are already cached on
+# the compute node or shared filesystem and you want to forbid network access.
+# export HF_HUB_OFFLINE=1
+# export TRANSFORMERS_OFFLINE=1
+
+mkdir -p "${WANDB_DIR}"
 
 echo "Job ID: ${SLURM_JOB_ID}"
 echo "Node list: ${SLURM_JOB_NODELIST}"
