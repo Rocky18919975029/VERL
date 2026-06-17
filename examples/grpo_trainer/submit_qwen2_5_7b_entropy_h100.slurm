@@ -88,6 +88,14 @@ PY
     fi
 done
 
+# ACD is an NVIDIA GPU cluster, but some images/modules may leave ROCm/HIP
+# visibility variables in the environment. verl refuses to start workers when
+# ROCR_VISIBLE_DEVICES coexists with CUDA_VISIBLE_DEVICES.
+unset ROCR_VISIBLE_DEVICES
+unset HIP_VISIBLE_DEVICES
+
+# Let Slurm set CUDA_VISIBLE_DEVICES for the allocated GPUs. If Slurm did not
+# set it, fall back to all eight GPUs on this node.
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
 export TOKENIZERS_PARALLELISM=${TOKENIZERS_PARALLELISM:-false}
 export HYDRA_FULL_ERROR=${HYDRA_FULL_ERROR:-1}
