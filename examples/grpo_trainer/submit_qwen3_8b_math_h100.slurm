@@ -31,7 +31,7 @@ VERL_WORKDIR=${VERL_WORKDIR:-${SLURM_SUBMIT_DIR}}
 # ACD modules. If your conda command is still unavailable, try anaconda3
 # instead of miniconda3, or submit with LOAD_CONDA_MODULE=anaconda3.
 module purge
-module load cuda/12.4
+module load cuda/12.8
 module load "${LOAD_CONDA_MODULE:-miniconda3}"
 
 # If you use conda/mamba, set CONDA_ENV_NAME when submitting or edit the default.
