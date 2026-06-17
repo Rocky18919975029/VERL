@@ -28,17 +28,23 @@ set -xeuo pipefail
 #   sbatch --export=ALL,VERL_WORKDIR=/path/to/VERL examples/grpo_trainer/submit_qwen3_8b_math_h100.slurm
 VERL_WORKDIR=${VERL_WORKDIR:-${SLURM_SUBMIT_DIR}}
 
-# ACD modules. If your conda command is still unavailable, try anaconda3
-# instead of miniconda3, or submit with LOAD_CONDA_MODULE=anaconda3.
+# ACD modules.
 module purge
 module load cuda/12.8
-module load "${LOAD_CONDA_MODULE:-miniconda3}"
 
-# If you use conda/mamba, set CONDA_ENV_NAME when submitting or edit the default.
-CONDA_ENV_NAME=${CONDA_ENV_NAME:-verl}
-if command -v conda >/dev/null 2>&1; then
-    eval "$(conda shell.bash hook)"
-    conda activate "${CONDA_ENV_NAME}"
+# Activate the known working conda environment. Override CONDA_ENV_PATH when
+# submitting if you move/recreate the environment.
+CONDA_SH=${CONDA_SH:-/share/anaconda3/etc/profile.d/conda.sh}
+CONDA_ENV_PATH=${CONDA_ENV_PATH:-/data/user/zhongal/.conda/envs/verl}
+if [ -f "${CONDA_SH}" ]; then
+    # shellcheck source=/dev/null
+    source "${CONDA_SH}"
+    conda deactivate || true
+    conda activate "${CONDA_ENV_PATH}"
+    hash -r
+else
+    echo "Conda init script not found: ${CONDA_SH}" >&2
+    exit 1
 fi
 
 cd "${VERL_WORKDIR}"
