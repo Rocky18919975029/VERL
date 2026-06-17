@@ -71,7 +71,7 @@ PY
 
 ########################### data and model ###########################
 
-MODEL_PATH=${MODEL_PATH:-Qwen/Qwen3-8B}
+MODEL_PATH=${MODEL_PATH:-/data/user/zhongal/models/Qwen3-8B}
 MATH_TRAIN_FILE=${MATH_TRAIN_FILE:-$HOME/data/math/train.parquet}
 MATH_TEST_FILE=${MATH_TEST_FILE:-$HOME/data/math/test.parquet}
 
@@ -82,6 +82,14 @@ if [ ! -f "${MATH_TRAIN_FILE}" ] || [ ! -f "${MATH_TEST_FILE}" ]; then
     echo "  ${MATH_TEST_FILE}" >&2
     echo "Prepare them with:" >&2
     echo "  python examples/data_preprocess/math_dataset.py --local_save_dir ~/data/math" >&2
+    exit 1
+fi
+
+if [ ! -d "${MODEL_PATH}" ]; then
+    echo "Local model directory not found: ${MODEL_PATH}" >&2
+    echo "Compute nodes have no network, so MODEL_PATH must point to a local directory." >&2
+    echo "Download on a network-enabled node, for example:" >&2
+    echo "  huggingface-cli download Qwen/Qwen3-8B --local-dir /data/user/zhongal/models/Qwen3-8B" >&2
     exit 1
 fi
 
@@ -112,10 +120,10 @@ export WANDB_MODE=${WANDB_MODE:-offline}
 export WANDB_DIR=${WANDB_DIR:-${VERL_WORKDIR}/wandb}
 export WANDB_SILENT=${WANDB_SILENT:-true}
 
-# Uncomment these if all Hugging Face models/tokenizers are already cached on
-# the compute node or shared filesystem and you want to forbid network access.
-# export HF_HUB_OFFLINE=1
-# export TRANSFORMERS_OFFLINE=1
+# Compute nodes have no network on ACD, so all models/tokenizers must already
+# exist on the shared filesystem.
+export HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}
+export TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-1}
 
 mkdir -p "${WANDB_DIR}"
 
