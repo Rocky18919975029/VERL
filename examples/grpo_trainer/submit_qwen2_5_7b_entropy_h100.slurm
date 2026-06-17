@@ -25,6 +25,7 @@ set -xeuo pipefail
 VERL_WORKDIR=${VERL_WORKDIR:-${SLURM_SUBMIT_DIR}}
 
 module purge
+module load glibc/2.32
 module load cuda/12.8
 
 CONDA_SH=${CONDA_SH:-/share/anaconda3/etc/profile.d/conda.sh}
@@ -57,6 +58,11 @@ print("cuda available:", torch.cuda.is_available())
 print("device count:", torch.cuda.device_count())
 if torch.cuda.is_available():
     print("gpu:", torch.cuda.get_device_name(0))
+try:
+    import flash_attn
+except Exception as exc:
+    raise SystemExit(f"failed to import flash_attn: {exc}")
+print("flash_attn import ok")
 PY
 
 METHOD=${METHOD:-kl_cov}

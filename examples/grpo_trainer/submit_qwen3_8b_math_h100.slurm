@@ -30,6 +30,7 @@ VERL_WORKDIR=${VERL_WORKDIR:-${SLURM_SUBMIT_DIR}}
 
 # ACD modules.
 module purge
+module load glibc/2.32
 module load cuda/12.8
 
 # Activate the known working conda environment. Override CONDA_ENV_PATH when
@@ -67,6 +68,11 @@ print("cuda available:", torch.cuda.is_available())
 print("device count:", torch.cuda.device_count())
 if torch.cuda.is_available():
     print("gpu:", torch.cuda.get_device_name(0))
+try:
+    import flash_attn
+except Exception as exc:
+    raise SystemExit(f"failed to import flash_attn: {exc}")
+print("flash_attn import ok")
 PY
 
 ########################### data and model ###########################
