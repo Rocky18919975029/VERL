@@ -159,6 +159,11 @@ REWARD=(
     reward.reward_manager.name=dapo
 )
 
+RAY=()
+if [ -n "${LD_LIBRARY_PATH:-}" ]; then
+    RAY+=("+ray_kwargs.ray_init.runtime_env.env_vars.LD_LIBRARY_PATH=${LD_LIBRARY_PATH}")
+fi
+
 TRAINER=(
     trainer.balance_batch=True
     trainer.logger='["console","wandb"]'
@@ -181,5 +186,6 @@ python3 -m verl.trainer.main_ppo \
     "${ROLLOUT[@]}" \
     "${REF[@]}" \
     "${REWARD[@]}" \
+    "${RAY[@]}" \
     "${TRAINER[@]}" \
     "$@"

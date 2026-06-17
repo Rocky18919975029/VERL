@@ -32,6 +32,10 @@ VERL_WORKDIR=${VERL_WORKDIR:-${SLURM_SUBMIT_DIR}}
 module purge
 module load glibc/2.32
 module load cuda/12.8
+module list
+
+echo "LD_LIBRARY_PATH after module load: ${LD_LIBRARY_PATH:-unset}"
+ldd --version | head -n 1 || true
 
 # Activate the known working conda environment. Override CONDA_ENV_PATH when
 # submitting if you move/recreate the environment.
@@ -54,9 +58,13 @@ mkdir -p logs
 echo "Python executable: $(which python || true)"
 echo "Conda prefix: ${CONDA_PREFIX:-unset}"
 python - <<'PY'
+import importlib.util
+import os
+import subprocess
 import sys
 
 print("python:", sys.version)
+print("LD_LIBRARY_PATH:", os.environ.get("LD_LIBRARY_PATH", "unset"))
 try:
     import torch
 except Exception as exc:
@@ -68,6 +76,10 @@ print("cuda available:", torch.cuda.is_available())
 print("device count:", torch.cuda.device_count())
 if torch.cuda.is_available():
     print("gpu:", torch.cuda.get_device_name(0))
+spec = importlib.util.find_spec("flash_attn_2_cuda")
+print("flash_attn_2_cuda:", None if spec is None else spec.origin)
+if spec is not None and spec.origin is not None:
+    subprocess.run(["ldd", spec.origin], check=False)
 try:
     import flash_attn
 except Exception as exc:
