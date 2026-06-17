@@ -5,20 +5,19 @@
 #   sbatch examples/grpo_trainer/submit_qwen3_8b_math_h100.slurm
 #
 # Cluster-specific fields:
-# - If your cluster requires an account, uncomment and set --account.
-# - If your cluster requires a partition/queue, uncomment and set --partition.
-# - If your cluster uses constraints instead of gpu:h100, adjust --gres/--constraint.
+# - This version is tuned for the ACD Slurm cluster shown by `sinfo`.
+# - If your allocation/account is required by Slurm, uncomment and set --account.
 
 #SBATCH --job-name=verl-grpo-qwen3-math
+#SBATCH --partition=acd_u
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=64
-#SBATCH --gres=gpu:h100:8
+#SBATCH --cpus-per-task=96
+#SBATCH --gres=gpu:8
 #SBATCH --mem=0
 #SBATCH --time=24:00:00
 #SBATCH --output=slurm-%x-%j.out
 #SBATCH --error=slurm-%x-%j.err
-##SBATCH --partition=your-partition
 ##SBATCH --account=your-account
 
 set -xeuo pipefail
@@ -29,10 +28,11 @@ set -xeuo pipefail
 #   sbatch --export=ALL,VERL_WORKDIR=/path/to/VERL examples/grpo_trainer/submit_qwen3_8b_math_h100.slurm
 VERL_WORKDIR=${VERL_WORKDIR:-${SLURM_SUBMIT_DIR}}
 
-# If your cluster uses environment modules, add them here, for example:
-#   module purge
-#   module load cuda/12.4
-#   module load anaconda
+# ACD modules. If your conda command is still unavailable, try anaconda3
+# instead of miniconda3, or submit with LOAD_CONDA_MODULE=anaconda3.
+module purge
+module load cuda/12.4
+module load "${LOAD_CONDA_MODULE:-miniconda3}"
 
 # If you use conda/mamba, set CONDA_ENV_NAME when submitting or edit the default.
 CONDA_ENV_NAME=${CONDA_ENV_NAME:-verl}
