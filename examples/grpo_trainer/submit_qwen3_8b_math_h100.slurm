@@ -1,0 +1,117 @@
+#!/bin/bash
+# Slurm job for Qwen3-8B GRPO RLVR on the MATH train split.
+#
+# Submit from the repository root with:
+#   sbatch examples/grpo_trainer/submit_qwen3_8b_math_h100.slurm
+#
+# Cluster-specific fields:
+# - If your cluster requires an account, uncomment and set --account.
+# - If your cluster requires a partition/queue, uncomment and set --partition.
+# - If your cluster uses constraints instead of gpu:h100, adjust --gres/--constraint.
+
+#SBATCH --job-name=verl-grpo-qwen3-math
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=64
+#SBATCH --gres=gpu:h100:8
+#SBATCH --mem=0
+#SBATCH --time=24:00:00
+#SBATCH --output=slurm-%x-%j.out
+#SBATCH --error=slurm-%x-%j.err
+##SBATCH --partition=your-partition
+##SBATCH --account=your-account
+
+set -xeuo pipefail
+
+########################### cluster environment ###########################
+
+# Submit this script from the VERL repo root, or set VERL_WORKDIR explicitly:
+#   sbatch --export=ALL,VERL_WORKDIR=/path/to/VERL examples/grpo_trainer/submit_qwen3_8b_math_h100.slurm
+VERL_WORKDIR=${VERL_WORKDIR:-${SLURM_SUBMIT_DIR}}
+
+# If your cluster uses environment modules, add them here, for example:
+#   module purge
+#   module load cuda/12.4
+#   module load anaconda
+
+# If you use conda/mamba, set CONDA_ENV_NAME when submitting or edit the default.
+CONDA_ENV_NAME=${CONDA_ENV_NAME:-verl}
+if command -v conda >/dev/null 2>&1; then
+    eval "$(conda shell.bash hook)"
+    conda activate "${CONDA_ENV_NAME}"
+fi
+
+cd "${VERL_WORKDIR}"
+mkdir -p logs
+
+########################### data and model ###########################
+
+MODEL_PATH=${MODEL_PATH:-Qwen/Qwen3-8B}
+MATH_TRAIN_FILE=${MATH_TRAIN_FILE:-$HOME/data/math/train.parquet}
+MATH_TEST_FILE=${MATH_TEST_FILE:-$HOME/data/math/test.parquet}
+
+if [ ! -f "${MATH_TRAIN_FILE}" ] || [ ! -f "${MATH_TEST_FILE}" ]; then
+    echo "MATH parquet files not found." >&2
+    echo "Expected:" >&2
+    echo "  ${MATH_TRAIN_FILE}" >&2
+    echo "  ${MATH_TEST_FILE}" >&2
+    echo "Prepare them with:" >&2
+    echo "  python examples/data_preprocess/math_dataset.py --local_save_dir ~/data/math" >&2
+    exit 1
+fi
+
+########################### training knobs ###########################
+
+# Conservative 8xH100 smoke-test defaults. Increase after the first run is stable.
+TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-256}
+PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-128}
+ROLLOUT_N=${ROLLOUT_N:-5}
+ROLLOUT_TP=${ROLLOUT_TP:-2}
+ROLLOUT_GPU_MEM_UTIL=${ROLLOUT_GPU_MEM_UTIL:-0.5}
+MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024}
+MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-2048}
+TOTAL_EPOCHS=${TOTAL_EPOCHS:-15}
+SAVE_FREQ=${SAVE_FREQ:-20}
+TEST_FREQ=${TEST_FREQ:-5}
+
+PROJECT_NAME=${PROJECT_NAME:-verl_grpo_math}
+EXPERIMENT_NAME=${EXPERIMENT_NAME:-qwen3_8b_math_h100_${SLURM_JOB_ID}}
+
+########################### runtime environment ###########################
+
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
+export TOKENIZERS_PARALLELISM=${TOKENIZERS_PARALLELISM:-false}
+export HYDRA_FULL_ERROR=${HYDRA_FULL_ERROR:-1}
+export PYTHONUNBUFFERED=1
+
+echo "Job ID: ${SLURM_JOB_ID}"
+echo "Node list: ${SLURM_JOB_NODELIST}"
+echo "Working directory: ${VERL_WORKDIR}"
+echo "Model: ${MODEL_PATH}"
+echo "Train file: ${MATH_TRAIN_FILE}"
+echo "Val file: ${MATH_TEST_FILE}"
+
+########################### launch ###########################
+
+MODEL_PATH="${MODEL_PATH}" \
+TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE}" \
+PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE}" \
+ROLLOUT_N="${ROLLOUT_N}" \
+ROLLOUT_TP="${ROLLOUT_TP}" \
+ROLLOUT_GPU_MEM_UTIL="${ROLLOUT_GPU_MEM_UTIL}" \
+MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH}" \
+MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH}" \
+TOTAL_EPOCHS="${TOTAL_EPOCHS}" \
+SAVE_FREQ="${SAVE_FREQ}" \
+TEST_FREQ="${TEST_FREQ}" \
+PROJECT_NAME="${PROJECT_NAME}" \
+EXPERIMENT_NAME="${EXPERIMENT_NAME}" \
+NNODES=1 \
+NGPUS_PER_NODE=8 \
+DEVICE=gpu \
+INFER_BACKEND=vllm \
+bash examples/grpo_trainer/run_qwen3_8b_fsdp.sh \
+    data.train_files="['${MATH_TRAIN_FILE}']" \
+    data.val_files="['${MATH_TEST_FILE}']" \
+    trainer.val_before_train=True \
+    "$@"
