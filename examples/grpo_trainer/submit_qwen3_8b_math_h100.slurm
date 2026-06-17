@@ -44,6 +44,25 @@ fi
 cd "${VERL_WORKDIR}"
 mkdir -p logs
 
+echo "Python executable: $(which python || true)"
+echo "Conda prefix: ${CONDA_PREFIX:-unset}"
+python - <<'PY'
+import sys
+
+print("python:", sys.version)
+try:
+    import torch
+except Exception as exc:
+    raise SystemExit(f"failed to import torch: {exc}")
+
+print("torch:", torch.__version__)
+print("torch cuda:", torch.version.cuda)
+print("cuda available:", torch.cuda.is_available())
+print("device count:", torch.cuda.device_count())
+if torch.cuda.is_available():
+    print("gpu:", torch.cuda.get_device_name(0))
+PY
+
 ########################### data and model ###########################
 
 MODEL_PATH=${MODEL_PATH:-Qwen/Qwen3-8B}
