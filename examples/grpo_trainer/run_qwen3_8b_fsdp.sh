@@ -47,6 +47,7 @@ test_freq=${TEST_FREQ:-5}
 
 PROJECT_NAME=${PROJECT_NAME:-verl_grpo_gsm8k_math}
 EXPERIMENT_NAME=${EXPERIMENT_NAME:-qwen3_8b_grpo_${INFER_BACKEND}_fsdp_$(date +%Y%m%d_%H%M)}
+trainer_logger=${TRAINER_LOGGER:-'["console","wandb"]'}
 ########################### end user-adjustable ###########################
 
 ########################### derived defaults ###########################
@@ -185,7 +186,7 @@ fi
 
 TRAINER=(
     trainer.balance_batch=True
-    trainer.logger='["console","wandb"]'
+    trainer.logger="${trainer_logger}"
     trainer.project_name=${PROJECT_NAME}
     trainer.experiment_name=${EXPERIMENT_NAME}
     trainer.n_gpus_per_node=${n_trainer_devices}

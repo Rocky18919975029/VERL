@@ -81,6 +81,7 @@ esac
 
 PROJECT_NAME=${PROJECT_NAME:-entropy_qwen2_5_7b}
 EXPERIMENT_NAME=${EXPERIMENT_NAME:-qwen2_5_7b_${METHOD}_$(date +%Y%m%d_%H%M)}
+trainer_logger=${TRAINER_LOGGER:-'["console","wandb"]'}
 
 DATA=(
     algorithm.adv_estimator=grpo
@@ -168,7 +169,7 @@ fi
 
 TRAINER=(
     trainer.balance_batch=True
-    trainer.logger='["console","wandb"]'
+    trainer.logger="${trainer_logger}"
     trainer.project_name="${PROJECT_NAME}"
     trainer.experiment_name="${EXPERIMENT_NAME}"
     trainer.n_gpus_per_node=${NGPUS_PER_NODE}
