@@ -40,6 +40,7 @@ rollout_gpu_mem_util=${ROLLOUT_GPU_MEM_UTIL:-}
 rollout_n=${ROLLOUT_N:-5}
 sp_size=${SP_SIZE:-1}
 attn_implementation=${ATTN_IMPLEMENTATION:-sdpa}
+dataloader_num_workers=${DATALOADER_NUM_WORKERS:-8}
 
 total_epochs=${TOTAL_EPOCHS:-15}
 save_freq=${SAVE_FREQ:-20}
@@ -135,6 +136,7 @@ DATA=(
     data.train_files="['$HOME/data/gsm8k/train.parquet', '$HOME/data/math/train.parquet']"
     data.val_files="['$HOME/data/gsm8k/test.parquet', '$HOME/data/math/test.parquet']"
     data.train_batch_size=${train_batch_size}
+    data.dataloader_num_workers=${dataloader_num_workers}
     data.max_prompt_length=${max_prompt_length}
     data.max_response_length=${max_response_length}
     data.filter_overlong_prompts=True

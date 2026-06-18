@@ -51,6 +51,7 @@ rollout_gpu_mem_util=${ROLLOUT_GPU_MEM_UTIL:-0.55}
 max_num_gen_batches=${MAX_NUM_GEN_BATCHES:-10}
 filter_groups=${FILTER_GROUPS:-True}
 attn_implementation=${ATTN_IMPLEMENTATION:-sdpa}
+dataloader_num_workers=${DATALOADER_NUM_WORKERS:-8}
 
 case "${METHOD}" in
     baseline)
@@ -94,6 +95,7 @@ DATA=(
     data.filter_overlong_prompts=False
     data.return_raw_chat=True
     data.train_batch_size=${train_batch_size}
+    data.dataloader_num_workers=${dataloader_num_workers}
     data.max_prompt_length=${max_prompt_length}
     data.max_response_length=${max_response_length}
 )
