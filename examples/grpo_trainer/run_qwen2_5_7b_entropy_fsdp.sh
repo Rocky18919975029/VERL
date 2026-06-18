@@ -32,6 +32,8 @@ if [ "${ENTROPY_REPRO_FULL:-0}" = "1" ]; then
     total_training_steps=${TOTAL_TRAINING_STEPS:-null}
     test_freq=${TEST_FREQ:-4}
     save_freq=${SAVE_FREQ:-32}
+    resume_mode=${RESUME_MODE:-auto}
+    max_actor_ckpt_to_keep=${MAX_ACTOR_CKPT_TO_KEEP:-3}
 else
     train_batch_size=${TRAIN_BATCH_SIZE:-16}
     ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE:-8}
@@ -43,6 +45,12 @@ else
     total_training_steps=${TOTAL_TRAINING_STEPS:-2}
     test_freq=${TEST_FREQ:--1}
     save_freq=${SAVE_FREQ:--1}
+    resume_mode=${RESUME_MODE:-disable}
+    max_actor_ckpt_to_keep=${MAX_ACTOR_CKPT_TO_KEEP:-null}
+fi
+
+if [ -n "${RESUME_FROM_PATH:-}" ] && [ -z "${RESUME_MODE:-}" ]; then
+    resume_mode=resume_path
 fi
 
 actor_lr=${ACTOR_LR:-5e-7}
@@ -169,6 +177,14 @@ if [ -n "${LD_LIBRARY_PATH:-}" ]; then
     RAY+=("+ray_kwargs.ray_init.runtime_env.env_vars.LD_LIBRARY_PATH=${LD_LIBRARY_PATH}")
 fi
 
+RESUME=(
+    trainer.resume_mode=${resume_mode}
+    trainer.max_actor_ckpt_to_keep=${max_actor_ckpt_to_keep}
+)
+if [ -n "${RESUME_FROM_PATH:-}" ]; then
+    RESUME+=(trainer.resume_from_path="${RESUME_FROM_PATH}")
+fi
+
 TRAINER=(
     trainer.balance_batch=True
     trainer.logger="${trainer_logger}"
@@ -181,7 +197,6 @@ TRAINER=(
     trainer.save_freq=${save_freq}
     trainer.total_epochs=${total_epochs}
     trainer.total_training_steps=${total_training_steps}
-    trainer.resume_mode=disable
 )
 
 python3 -m verl.trainer.main_ppo \
@@ -192,5 +207,6 @@ python3 -m verl.trainer.main_ppo \
     "${REF[@]}" \
     "${REWARD[@]}" \
     "${RAY[@]}" \
+    "${RESUME[@]}" \
     "${TRAINER[@]}" \
     "$@"

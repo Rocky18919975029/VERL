@@ -161,13 +161,31 @@ export NVCC_THREADS=${NVCC_THREADS:-1}
 mkdir -p "${WANDB_DIR}" "${RAY_TMP_DIR}"
 
 PROJECT_NAME=${PROJECT_NAME:-entropy_qwen2_5_7b}
-EXPERIMENT_NAME=${EXPERIMENT_NAME:-qwen2_5_7b_${METHOD}_smoke_${SLURM_JOB_ID}}
+if [ -z "${EXPERIMENT_NAME:-}" ]; then
+    if [ "${ENTROPY_REPRO_FULL:-0}" = "1" ]; then
+        EXPERIMENT_NAME=qwen2_5_7b_${METHOD}_full
+    else
+        EXPERIMENT_NAME=qwen2_5_7b_${METHOD}_smoke_${SLURM_JOB_ID}
+    fi
+fi
+if [ -n "${RESUME_MODE:-}" ]; then
+    EFFECTIVE_RESUME_MODE=${RESUME_MODE}
+elif [ -n "${RESUME_FROM_PATH:-}" ]; then
+    EFFECTIVE_RESUME_MODE=resume_path
+elif [ "${ENTROPY_REPRO_FULL:-0}" = "1" ]; then
+    EFFECTIVE_RESUME_MODE=auto
+else
+    EFFECTIVE_RESUME_MODE=disable
+fi
 
 echo "Job ID: ${SLURM_JOB_ID}"
 echo "Node list: ${SLURM_JOB_NODELIST}"
 echo "Working directory: ${VERL_WORKDIR}"
 echo "Ray tmp dir: ${RAY_TMP_DIR}"
 echo "Method: ${METHOD}"
+echo "Experiment: ${EXPERIMENT_NAME}"
+echo "Resume mode: ${EFFECTIVE_RESUME_MODE}"
+echo "Checkpoint dir: checkpoints/${PROJECT_NAME}/${EXPERIMENT_NAME}"
 echo "Model: ${MODEL_PATH}"
 echo "Train file: ${TRAIN_FILE}"
 echo "Val files: ${VAL_FILES}"
