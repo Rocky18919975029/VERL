@@ -1034,6 +1034,19 @@ class vLLMReplica(RolloutReplica):
                 **{var: "1" for var in get_platform().ray_noset_envvars()},
                 **get_platform().rollout_env_vars(),
             }
+            for var in (
+                "CC",
+                "CXX",
+                "CUDAHOSTCXX",
+                "LD_LIBRARY_PATH",
+                "MAX_JOBS",
+                "NVCC_THREADS",
+                "TORCH_CUDA_ARCH_LIST",
+                "VLLM_LOGGING_LEVEL",
+                "VLLM_USE_V1",
+            ):
+                if os.environ.get(var) is not None:
+                    env_vars[var] = os.environ[var]
 
             server = self.server_class.options(
                 scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
