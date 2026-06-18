@@ -169,6 +169,7 @@ export TRAINER_LOGGER=${TRAINER_LOGGER:-'["console","wandb"]'}
 export WANDB_MODE=${WANDB_MODE:-offline}
 export WANDB_DIR=${WANDB_DIR:-${VERL_WORKDIR}/wandb}
 export WANDB_SILENT=${WANDB_SILENT:-true}
+export WANDB_START_METHOD=${WANDB_START_METHOD:-thread}
 export CC=${CC:-$(which gcc)}
 export CXX=${CXX:-$(which g++)}
 export CUDAHOSTCXX=${CUDAHOSTCXX:-$(which g++)}
