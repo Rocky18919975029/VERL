@@ -30,6 +30,41 @@ logger = logging.getLogger(__name__)
 
 MLFLOW_MAX_ATTEMPTS = 3
 MLFLOW_SLEEP_SECONDS = 5
+_WANDB_TEARDOWN_PATCHED = False
+
+
+def _patch_wandb_service_teardown():
+    global _WANDB_TEARDOWN_PATCHED
+
+    if _WANDB_TEARDOWN_PATCHED:
+        return
+
+    try:
+        from wandb.sdk.lib.service.service_connection import ServiceConnection
+    except Exception:
+        return
+
+    original_teardown = ServiceConnection.teardown
+
+    def teardown_without_atexit_noise(self, *args, **kwargs):
+        try:
+            return original_teardown(self, *args, **kwargs)
+        except BrokenPipeError:
+            logger.debug("Ignoring wandb service BrokenPipe during teardown.", exc_info=True)
+            return None
+        except RuntimeError as exc:
+            if "handler is closed" in str(exc) or "transport" in str(exc).lower():
+                logger.debug("Ignoring wandb service closed transport during teardown.", exc_info=True)
+                return None
+            raise
+        except AssertionError as exc:
+            if "Already torn down" in str(exc):
+                logger.debug("Ignoring repeated wandb service teardown.", exc_info=True)
+                return None
+            raise
+
+    ServiceConnection.teardown = teardown_without_atexit_noise
+    _WANDB_TEARDOWN_PATCHED = True
 
 
 class Tracking:
@@ -73,6 +108,8 @@ class Tracking:
             import os
 
             import wandb
+
+            _patch_wandb_service_teardown()
 
             settings_kwargs = {
                 "finish_timeout": float(os.environ.get("WANDB_FINISH_TIMEOUT", "5")),
