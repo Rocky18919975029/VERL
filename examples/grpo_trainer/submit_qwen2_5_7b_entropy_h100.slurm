@@ -24,8 +24,17 @@ set -xeuo pipefail
 
 VERL_WORKDIR=${VERL_WORKDIR:-${SLURM_SUBMIT_DIR}}
 
+# Do not run conda/Python by globally overriding glibc with LD_LIBRARY_PATH.
+# The ACD glibc module only adjusts PATH; adding its lib directory can segfault
+# mixed conda/system processes. Build flash-attn against the host glibc instead.
+LD_LIBRARY_PATH=":${LD_LIBRARY_PATH:-}:"
+LD_LIBRARY_PATH=${LD_LIBRARY_PATH//:\/data\/apps\/glibc\/2.32\/lib:/:}
+LD_LIBRARY_PATH=${LD_LIBRARY_PATH//:\/data\/apps\/glibc\/2.32\/lib64:/:}
+LD_LIBRARY_PATH=${LD_LIBRARY_PATH#:}
+LD_LIBRARY_PATH=${LD_LIBRARY_PATH%:}
+export LD_LIBRARY_PATH
+
 module purge
-module load glibc/2.32
 module load cuda/12.8
 module list
 
