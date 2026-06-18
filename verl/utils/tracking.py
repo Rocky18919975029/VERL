@@ -190,20 +190,27 @@ class Tracking:
         if self._finished:
             return
         self._finished = True
+
+        def finish_backend(name, finish_fn):
+            try:
+                finish_fn()
+            except Exception:
+                logger.warning("Failed to finish %s tracking backend.", name, exc_info=True)
+
         if "wandb" in self.logger:
-            self.logger["wandb"].finish(exit_code=exit_code)
+            finish_backend("wandb", lambda: self.logger["wandb"].finish(exit_code=exit_code))
         if "swanlab" in self.logger:
-            self.logger["swanlab"].finish()
+            finish_backend("swanlab", self.logger["swanlab"].finish)
         if "vemlp_wandb" in self.logger:
-            self.logger["vemlp_wandb"].finish(exit_code=exit_code)
+            finish_backend("vemlp_wandb", lambda: self.logger["vemlp_wandb"].finish(exit_code=exit_code))
         if "tensorboard" in self.logger:
-            self.logger["tensorboard"].finish()
+            finish_backend("tensorboard", self.logger["tensorboard"].finish)
         if "clearml" in self.logger:
-            self.logger["clearml"].finish()
+            finish_backend("clearml", self.logger["clearml"].finish)
         if "trackio" in self.logger:
-            self.logger["trackio"].finish()
+            finish_backend("trackio", self.logger["trackio"].finish)
         if "file" in self.logger:
-            self.logger["file"].finish()
+            finish_backend("file", self.logger["file"].finish)
 
     def __del__(self):
         try:

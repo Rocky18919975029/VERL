@@ -7,6 +7,10 @@
 # Common overrides:
 #   sbatch --export=ALL,METHOD=baseline examples/grpo_trainer/submit_qwen2_5_7b_entropy_h100.slurm
 #   sbatch --export=ALL,ENTROPY_REPRO_FULL=1,METHOD=kl_cov examples/grpo_trainer/submit_qwen2_5_7b_entropy_h100.slurm
+#
+# If an override value contains commas, such as TRAINER_LOGGER='["console","wandb"]',
+# export it in the shell first and submit with --export=ALL. Slurm splits
+# --export key-value pairs on commas.
 
 #SBATCH --job-name=verl-entropy-7b
 #SBATCH --partition=acd_u
@@ -15,7 +19,7 @@
 #SBATCH --cpus-per-task=96
 #SBATCH --gres=gpu:8
 #SBATCH --mem=0
-#SBATCH --time=04:00:00
+#SBATCH --time=7-00:00:00
 #SBATCH --output=slurm-%x-%j.out
 #SBATCH --error=slurm-%x-%j.err
 ##SBATCH --account=your-account
@@ -141,7 +145,7 @@ export PYTHONUNBUFFERED=1
 export RAY_DEDUP_LOGS=${RAY_DEDUP_LOGS:-0}
 export VLLM_LOGGING_LEVEL=${VLLM_LOGGING_LEVEL:-INFO}
 export RAY_TMP_DIR=${RAY_TMP_DIR:-${VERL_WORKDIR}/ray_tmp/${SLURM_JOB_ID}}
-export TRAINER_LOGGER=${TRAINER_LOGGER:-'["console"]'}
+export TRAINER_LOGGER=${TRAINER_LOGGER:-'["console","wandb"]'}
 export WANDB_MODE=${WANDB_MODE:-offline}
 export WANDB_DIR=${WANDB_DIR:-${VERL_WORKDIR}/wandb}
 export WANDB_SILENT=${WANDB_SILENT:-true}
