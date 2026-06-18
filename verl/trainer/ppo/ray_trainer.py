@@ -511,6 +511,33 @@ class RayPPOTrainer:
         self._dump_futures.clear()
         self._dump_executor.shutdown(wait=True)
 
+    @staticmethod
+    def _shutdown_dataloader_iterator(iterator):
+        """Best-effort shutdown for multiprocessing dataloader iterators."""
+        if iterator is None:
+            return
+        candidates = [
+            iterator,
+            getattr(iterator, "_iterator", None),
+            getattr(iterator, "_main_iter", None),
+            getattr(iterator, "_wrapped_iterator", None),
+        ]
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            for method_name in ("_shutdown_workers", "shutdown", "close"):
+                shutdown = getattr(candidate, method_name, None)
+                if callable(shutdown):
+                    shutdown()
+                    return
+
+    def _iterate_train_dataloader(self):
+        iterator = iter(self.train_dataloader)
+        try:
+            yield from iterator
+        finally:
+            self._shutdown_dataloader_iterator(iterator)
+
     def _log_rollout_data(
         self, batch: DataProto, reward_extra_infos_dict: dict, timing_raw: dict, rollout_data_dir: str
     ):
@@ -1418,7 +1445,7 @@ class RayPPOTrainer:
         next_step_profile = False
 
         for epoch in range(current_epoch, self.config.trainer.total_epochs):
-            for batch_dict in self.train_dataloader:
+            for batch_dict in self._iterate_train_dataloader():
                 if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
                     self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=False)
                 metrics = {}
