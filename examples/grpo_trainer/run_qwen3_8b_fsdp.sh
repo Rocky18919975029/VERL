@@ -142,7 +142,7 @@ DATA=(
 
 MODEL=(
     actor_rollout_ref.model.path="$MODEL_PATH"
-    actor_rollout_ref.model.override_config.attn_implementation=${attn_implementation}
+    +actor_rollout_ref.model.override_config.attn_implementation=${attn_implementation}
     actor_rollout_ref.model.use_remove_padding=True
     actor_rollout_ref.model.enable_gradient_checkpointing=True
 )
