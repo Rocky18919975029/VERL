@@ -40,6 +40,7 @@ export LD_LIBRARY_PATH
 
 # ACD modules.
 module purge
+module load gcc/13.3
 module load cuda/12.8
 module list
 
@@ -157,6 +158,12 @@ export PYTHONUNBUFFERED=1
 export WANDB_MODE=${WANDB_MODE:-offline}
 export WANDB_DIR=${WANDB_DIR:-${VERL_WORKDIR}/wandb}
 export WANDB_SILENT=${WANDB_SILENT:-true}
+export CC=${CC:-$(which gcc)}
+export CXX=${CXX:-$(which g++)}
+export CUDAHOSTCXX=${CUDAHOSTCXX:-$(which g++)}
+export TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST:-9.0}
+export MAX_JOBS=${MAX_JOBS:-4}
+export NVCC_THREADS=${NVCC_THREADS:-1}
 
 # Compute nodes have no network on ACD, so all models/tokenizers must already
 # exist on the shared filesystem.
