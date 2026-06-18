@@ -4,7 +4,7 @@
 # Compute nodes have no network, so first download the source archive on a
 # network-enabled login node:
 #   mkdir -p /data/user/zhongal/packages
-#   pip download --no-binary flash-attn --no-deps -d /data/user/zhongal/packages flash-attn==2.8.3.post1
+#   pip download --no-build-isolation --no-binary flash-attn --no-deps -d /data/user/zhongal/packages flash-attn==2.8.3.post1
 #
 # Then submit:
 #   sbatch examples/grpo_trainer/build_flash_attn_h100.slurm
@@ -13,7 +13,7 @@
 #SBATCH --partition=acd_u
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=32
+#SBATCH --cpus-per-task=12
 #SBATCH --gres=gpu:1
 #SBATCH --mem=0
 #SBATCH --time=04:00:00
@@ -59,7 +59,7 @@ if [ ! -f "${FLASH_ATTN_SOURCE}" ]; then
     echo "flash-attn source archive not found: ${FLASH_ATTN_SOURCE}" >&2
     echo "Download it on the login node first:" >&2
     echo "  mkdir -p /data/user/zhongal/packages" >&2
-    echo "  pip download --no-binary flash-attn --no-deps -d /data/user/zhongal/packages flash-attn==${FLASH_ATTN_VERSION}" >&2
+    echo "  pip download --no-build-isolation --no-binary flash-attn --no-deps -d /data/user/zhongal/packages flash-attn==${FLASH_ATTN_VERSION}" >&2
     exit 1
 fi
 
