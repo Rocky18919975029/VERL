@@ -25,6 +25,7 @@ if [ "${ENTROPY_REPRO_FULL:-0}" = "1" ]; then
     train_batch_size=${TRAIN_BATCH_SIZE:-256}
     ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE:-32}
     rollout_n=${ROLLOUT_N:-8}
+    rollout_gpu_mem_util=${ROLLOUT_GPU_MEM_UTIL:-0.45}
     max_prompt_length=${MAX_PROMPT_LENGTH:-2048}
     max_response_length=${MAX_RESPONSE_LENGTH:-8192}
     ppo_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU:-30720}
@@ -38,6 +39,7 @@ else
     train_batch_size=${TRAIN_BATCH_SIZE:-16}
     ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE:-8}
     rollout_n=${ROLLOUT_N:-2}
+    rollout_gpu_mem_util=${ROLLOUT_GPU_MEM_UTIL:-0.55}
     max_prompt_length=${MAX_PROMPT_LENGTH:-1024}
     max_response_length=${MAX_RESPONSE_LENGTH:-1024}
     ppo_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU:-8192}
@@ -55,7 +57,6 @@ fi
 
 actor_lr=${ACTOR_LR:-5e-7}
 rollout_tp=${ROLLOUT_TP:-2}
-rollout_gpu_mem_util=${ROLLOUT_GPU_MEM_UTIL:-0.55}
 max_num_gen_batches=${MAX_NUM_GEN_BATCHES:-10}
 filter_groups=${FILTER_GROUPS:-True}
 attn_implementation=${ATTN_IMPLEMENTATION:-sdpa}
@@ -198,6 +199,22 @@ TRAINER=(
     trainer.total_epochs=${total_epochs}
     trainer.total_training_steps=${total_training_steps}
 )
+
+echo "Effective entropy training config:"
+echo "  mode: $([ "${ENTROPY_REPRO_FULL:-0}" = "1" ] && echo full || echo smoke)"
+echo "  method: ${METHOD}"
+echo "  experiment: ${EXPERIMENT_NAME}"
+echo "  train_batch_size: ${train_batch_size}"
+echo "  ppo_mini_batch_size: ${ppo_mini_batch_size}"
+echo "  rollout_n: ${rollout_n}"
+echo "  rollout_gpu_memory_utilization: ${rollout_gpu_mem_util}"
+echo "  max_prompt_length: ${max_prompt_length}"
+echo "  max_response_length: ${max_response_length}"
+echo "  ppo_max_token_len_per_gpu: ${ppo_max_token_len_per_gpu}"
+echo "  total_training_steps: ${total_training_steps}"
+echo "  save_freq: ${save_freq}"
+echo "  test_freq: ${test_freq}"
+echo "  resume_mode: ${resume_mode}"
 
 python3 -m verl.trainer.main_ppo \
     "${DATA[@]}" \
