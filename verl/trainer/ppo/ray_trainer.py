@@ -1396,6 +1396,7 @@ class RayPPOTrainer:
             logger.log(data=val_metrics, step=self.global_steps)
             if self.config.trainer.get("val_only", False):
                 self._shutdown_dump_executor()
+                logger.finish()
                 return
 
         # add tqdm
@@ -1756,6 +1757,7 @@ class RayPPOTrainer:
                     self._shutdown_dump_executor()
                     pprint(f"Final validation metrics: {last_val_metrics}")
                     progress_bar.close()
+                    logger.finish()
                     return
 
                 # this is experimental and may be changed/removed in the future
@@ -1766,3 +1768,4 @@ class RayPPOTrainer:
 
         # Ensure dump executor is shut down when training loop ends without reaching is_last_step
         self._shutdown_dump_executor()
+        logger.finish()
