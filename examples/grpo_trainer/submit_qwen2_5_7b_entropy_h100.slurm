@@ -75,15 +75,18 @@ print("cuda available:", torch.cuda.is_available())
 print("device count:", torch.cuda.device_count())
 if torch.cuda.is_available():
     print("gpu:", torch.cuda.get_device_name(0))
-spec = importlib.util.find_spec("flash_attn_2_cuda")
-print("flash_attn_2_cuda:", None if spec is None else spec.origin)
-if spec is not None and spec.origin is not None:
-    subprocess.run(["ldd", spec.origin], check=False)
-try:
-    import flash_attn
-except Exception as exc:
-    raise SystemExit(f"failed to import flash_attn: {exc}")
-print("flash_attn import ok")
+attn_implementation = os.environ.get("ATTN_IMPLEMENTATION", "sdpa")
+print("attn implementation:", attn_implementation)
+if attn_implementation == "flash_attention_2":
+    spec = importlib.util.find_spec("flash_attn_2_cuda")
+    print("flash_attn_2_cuda:", None if spec is None else spec.origin)
+    if spec is not None and spec.origin is not None:
+        subprocess.run(["ldd", spec.origin], check=False)
+    try:
+        import flash_attn
+    except Exception as exc:
+        raise SystemExit(f"failed to import flash_attn: {exc}")
+    print("flash_attn import ok")
 PY
 
 METHOD=${METHOD:-kl_cov}

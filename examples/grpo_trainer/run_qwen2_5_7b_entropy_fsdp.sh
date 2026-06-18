@@ -50,7 +50,7 @@ rollout_tp=${ROLLOUT_TP:-2}
 rollout_gpu_mem_util=${ROLLOUT_GPU_MEM_UTIL:-0.55}
 max_num_gen_batches=${MAX_NUM_GEN_BATCHES:-10}
 filter_groups=${FILTER_GROUPS:-True}
-attn_implementation=${ATTN_IMPLEMENTATION:-flash_attention_2}
+attn_implementation=${ATTN_IMPLEMENTATION:-sdpa}
 
 case "${METHOD}" in
     baseline)
