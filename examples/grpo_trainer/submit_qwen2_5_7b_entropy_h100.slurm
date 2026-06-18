@@ -165,7 +165,7 @@ if [ -z "${EXPERIMENT_NAME:-}" ]; then
     if [ "${ENTROPY_REPRO_FULL:-0}" = "1" ]; then
         EXPERIMENT_NAME=qwen2_5_7b_${METHOD}_full
     else
-        EXPERIMENT_NAME=qwen2_5_7b_${METHOD}_smoke_${SLURM_JOB_ID}
+        EXPERIMENT_NAME=qwen2_5_7b_${METHOD}_smoke
     fi
 fi
 if [ -n "${RESUME_MODE:-}" ]; then
@@ -175,7 +175,7 @@ elif [ -n "${RESUME_FROM_PATH:-}" ]; then
 elif [ "${ENTROPY_REPRO_FULL:-0}" = "1" ]; then
     EFFECTIVE_RESUME_MODE=auto
 else
-    EFFECTIVE_RESUME_MODE=disable
+    EFFECTIVE_RESUME_MODE=auto
 fi
 
 echo "Job ID: ${SLURM_JOB_ID}"

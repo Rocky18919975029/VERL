@@ -44,9 +44,9 @@ else
     total_epochs=${TOTAL_EPOCHS:-1}
     total_training_steps=${TOTAL_TRAINING_STEPS:-2}
     test_freq=${TEST_FREQ:--1}
-    save_freq=${SAVE_FREQ:--1}
-    resume_mode=${RESUME_MODE:-disable}
-    max_actor_ckpt_to_keep=${MAX_ACTOR_CKPT_TO_KEEP:-null}
+    save_freq=${SAVE_FREQ:-1}
+    resume_mode=${RESUME_MODE:-auto}
+    max_actor_ckpt_to_keep=${MAX_ACTOR_CKPT_TO_KEEP:-2}
 fi
 
 if [ -n "${RESUME_FROM_PATH:-}" ] && [ -z "${RESUME_MODE:-}" ]; then
