@@ -157,6 +157,7 @@ export HYDRA_FULL_ERROR=${HYDRA_FULL_ERROR:-1}
 export PYTHONUNBUFFERED=1
 export RAY_DEDUP_LOGS=${RAY_DEDUP_LOGS:-0}
 export VLLM_LOGGING_LEVEL=${VLLM_LOGGING_LEVEL:-INFO}
+export RAY_TMP_DIR=${RAY_TMP_DIR:-${VERL_WORKDIR}/ray_tmp/${SLURM_JOB_ID}}
 export WANDB_MODE=${WANDB_MODE:-offline}
 export WANDB_DIR=${WANDB_DIR:-${VERL_WORKDIR}/wandb}
 export WANDB_SILENT=${WANDB_SILENT:-true}
@@ -172,11 +173,12 @@ export NVCC_THREADS=${NVCC_THREADS:-1}
 export HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}
 export TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-1}
 
-mkdir -p "${WANDB_DIR}"
+mkdir -p "${WANDB_DIR}" "${RAY_TMP_DIR}"
 
 echo "Job ID: ${SLURM_JOB_ID}"
 echo "Node list: ${SLURM_JOB_NODELIST}"
 echo "Working directory: ${VERL_WORKDIR}"
+echo "Ray tmp dir: ${RAY_TMP_DIR}"
 echo "Model: ${MODEL_PATH}"
 echo "Train file: ${MATH_TRAIN_FILE}"
 echo "Val file: ${MATH_TEST_FILE}"

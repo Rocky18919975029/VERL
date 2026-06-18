@@ -176,6 +176,9 @@ REF=(
 )
 
 RAY=()
+if [ -n "${RAY_TMP_DIR:-}" ]; then
+    RAY+=("+ray_kwargs.ray_init._temp_dir=${RAY_TMP_DIR}")
+fi
 if [ -n "${LD_LIBRARY_PATH:-}" ]; then
     RAY+=("+ray_kwargs.ray_init.runtime_env.env_vars.LD_LIBRARY_PATH=${LD_LIBRARY_PATH}")
 fi

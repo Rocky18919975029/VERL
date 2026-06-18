@@ -133,6 +133,7 @@ export HYDRA_FULL_ERROR=${HYDRA_FULL_ERROR:-1}
 export PYTHONUNBUFFERED=1
 export RAY_DEDUP_LOGS=${RAY_DEDUP_LOGS:-0}
 export VLLM_LOGGING_LEVEL=${VLLM_LOGGING_LEVEL:-INFO}
+export RAY_TMP_DIR=${RAY_TMP_DIR:-${VERL_WORKDIR}/ray_tmp/${SLURM_JOB_ID}}
 export WANDB_MODE=${WANDB_MODE:-offline}
 export WANDB_DIR=${WANDB_DIR:-${VERL_WORKDIR}/wandb}
 export WANDB_SILENT=${WANDB_SILENT:-true}
@@ -144,7 +145,7 @@ export CUDAHOSTCXX=${CUDAHOSTCXX:-$(which g++)}
 export TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST:-9.0}
 export MAX_JOBS=${MAX_JOBS:-4}
 export NVCC_THREADS=${NVCC_THREADS:-1}
-mkdir -p "${WANDB_DIR}"
+mkdir -p "${WANDB_DIR}" "${RAY_TMP_DIR}"
 
 PROJECT_NAME=${PROJECT_NAME:-entropy_qwen2_5_7b}
 EXPERIMENT_NAME=${EXPERIMENT_NAME:-qwen2_5_7b_${METHOD}_smoke_${SLURM_JOB_ID}}
@@ -152,6 +153,7 @@ EXPERIMENT_NAME=${EXPERIMENT_NAME:-qwen2_5_7b_${METHOD}_smoke_${SLURM_JOB_ID}}
 echo "Job ID: ${SLURM_JOB_ID}"
 echo "Node list: ${SLURM_JOB_NODELIST}"
 echo "Working directory: ${VERL_WORKDIR}"
+echo "Ray tmp dir: ${RAY_TMP_DIR}"
 echo "Method: ${METHOD}"
 echo "Model: ${MODEL_PATH}"
 echo "Train file: ${TRAIN_FILE}"
