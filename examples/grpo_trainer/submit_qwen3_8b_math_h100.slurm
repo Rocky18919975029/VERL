@@ -86,6 +86,13 @@ print("cuda available:", torch.cuda.is_available())
 print("device count:", torch.cuda.device_count())
 if torch.cuda.is_available():
     print("gpu:", torch.cuda.get_device_name(0))
+try:
+    import numpy
+    import numba
+except Exception as exc:
+    raise SystemExit(f"failed to import numpy/numba: {exc}")
+print("numpy:", numpy.__version__)
+print("numba:", numba.__version__)
 attn_implementation = os.environ.get("ATTN_IMPLEMENTATION", "sdpa")
 print("attn implementation:", attn_implementation)
 if attn_implementation == "flash_attention_2":
