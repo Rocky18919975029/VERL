@@ -32,10 +32,14 @@ if [ "${ENTROPY_REPRO_FULL:-0}" = "1" ]; then
     rollout_max_model_len=${ROLLOUT_MAX_MODEL_LEN:-$((max_prompt_length + max_response_length))}
     rollout_max_num_batched_tokens=${ROLLOUT_MAX_NUM_BATCHED_TOKENS:-${rollout_max_model_len}}
     rollout_enforce_eager=${ROLLOUT_ENFORCE_EAGER:-True}
-    ppo_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU:-30720}
+    ppo_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU:-$((rollout_max_model_len * 2))}
+    infer_max_token_len_per_gpu=${INFER_MAX_TOKEN_LEN_PER_GPU:-$((rollout_max_model_len * 3))}
     actor_param_offload=${ACTOR_PARAM_OFFLOAD:-True}
     actor_optimizer_offload=${ACTOR_OPTIMIZER_OFFLOAD:-True}
     ref_param_offload=${REF_PARAM_OFFLOAD:-True}
+    fsdp_strategy=${FSDP_STRATEGY:-fsdp2}
+    fsdp_size=${FSDP_SIZE:-2}
+    sp_size=${SP_SIZE:-4}
     total_epochs=${TOTAL_EPOCHS:-15}
     total_training_steps=${TOTAL_TRAINING_STEPS:-null}
     test_freq=${TEST_FREQ:-4}
@@ -51,12 +55,16 @@ else
     max_prompt_length=${MAX_PROMPT_LENGTH:-1024}
     max_response_length=${MAX_RESPONSE_LENGTH:-1024}
     ppo_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU:-8192}
+    infer_max_token_len_per_gpu=${INFER_MAX_TOKEN_LEN_PER_GPU:-${ppo_max_token_len_per_gpu}}
     rollout_max_model_len=${ROLLOUT_MAX_MODEL_LEN:-$((max_prompt_length + max_response_length))}
     rollout_max_num_batched_tokens=${ROLLOUT_MAX_NUM_BATCHED_TOKENS:-${ppo_max_token_len_per_gpu}}
     rollout_enforce_eager=${ROLLOUT_ENFORCE_EAGER:-False}
     actor_param_offload=${ACTOR_PARAM_OFFLOAD:-False}
     actor_optimizer_offload=${ACTOR_OPTIMIZER_OFFLOAD:-False}
     ref_param_offload=${REF_PARAM_OFFLOAD:-False}
+    fsdp_strategy=${FSDP_STRATEGY:-fsdp}
+    fsdp_size=${FSDP_SIZE:--1}
+    sp_size=${SP_SIZE:-1}
     total_epochs=${TOTAL_EPOCHS:-1}
     total_training_steps=${TOTAL_TRAINING_STEPS:-2}
     test_freq=${TEST_FREQ:--1}
@@ -126,6 +134,7 @@ DATA=(
 MODEL=(
     actor_rollout_ref.model.path="${MODEL_PATH}"
     +actor_rollout_ref.model.override_config.attn_implementation=${attn_implementation}
+    +actor_rollout_ref.model.override_config.max_position_embeddings=${MODEL_MAX_POSITION_EMBEDDINGS:-32768}
     actor_rollout_ref.model.use_remove_padding=True
     actor_rollout_ref.model.enable_gradient_checkpointing=True
 )
@@ -151,8 +160,15 @@ ACTOR=(
     actor_rollout_ref.actor.policy_loss.clip_cov_ub=5.0
     actor_rollout_ref.actor.policy_loss.kl_cov_ratio=0.002
     actor_rollout_ref.actor.policy_loss.ppo_kl_coef=1.0
+    actor_rollout_ref.actor.fsdp_config.strategy=${fsdp_strategy}
+    actor_rollout_ref.actor.fsdp_config.fsdp_size=${fsdp_size}
+    actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size=${sp_size}
     actor_rollout_ref.actor.fsdp_config.param_offload=${actor_param_offload}
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=${actor_optimizer_offload}
+)
+
+CRITIC=(
+    critic.strategy=${fsdp_strategy}
 )
 
 ROLLOUT=(
@@ -169,7 +185,7 @@ ROLLOUT=(
     actor_rollout_ref.rollout.top_p=1.0
     actor_rollout_ref.rollout.top_k=-1
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True
-    actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${ppo_max_token_len_per_gpu}
+    actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${infer_max_token_len_per_gpu}
     actor_rollout_ref.rollout.val_kwargs.temperature=0
     actor_rollout_ref.rollout.val_kwargs.top_p=1.0
     actor_rollout_ref.rollout.val_kwargs.top_k=-1
@@ -179,7 +195,8 @@ ROLLOUT=(
 
 REF=(
     actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True
-    actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${ppo_max_token_len_per_gpu}
+    actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${infer_max_token_len_per_gpu}
+    actor_rollout_ref.ref.fsdp_config.ulysses_sequence_parallel_size=${sp_size}
     actor_rollout_ref.ref.fsdp_config.param_offload=${ref_param_offload}
 )
 
@@ -232,10 +249,14 @@ echo "  rollout_enforce_eager: ${rollout_enforce_eager}"
 echo "  max_prompt_length: ${max_prompt_length}"
 echo "  max_response_length: ${max_response_length}"
 echo "  ppo_max_token_len_per_gpu: ${ppo_max_token_len_per_gpu}"
+echo "  infer_max_token_len_per_gpu: ${infer_max_token_len_per_gpu}"
 echo "  total_training_steps: ${total_training_steps}"
 echo "  save_freq: ${save_freq}"
 echo "  test_freq: ${test_freq}"
 echo "  resume_mode: ${resume_mode}"
+echo "  fsdp_strategy: ${fsdp_strategy}"
+echo "  fsdp_size: ${fsdp_size}"
+echo "  sp_size: ${sp_size}"
 echo "  actor_param_offload: ${actor_param_offload}"
 echo "  actor_optimizer_offload: ${actor_optimizer_offload}"
 echo "  ref_param_offload: ${ref_param_offload}"
@@ -244,6 +265,7 @@ python3 -m verl.trainer.main_ppo \
     "${DATA[@]}" \
     "${MODEL[@]}" \
     "${ACTOR[@]}" \
+    "${CRITIC[@]}" \
     "${ROLLOUT[@]}" \
     "${REF[@]}" \
     "${REWARD[@]}" \
