@@ -40,9 +40,6 @@ if [ "${ENTROPY_REPRO_FULL:-0}" = "1" ]; then
     fsdp_strategy=${FSDP_STRATEGY:-fsdp2}
     fsdp_size=${FSDP_SIZE:-2}
     sp_size=${SP_SIZE:-4}
-    use_torch_compile=${USE_TORCH_COMPILE:-False}
-    entropy_from_logits_with_chunking=${ENTROPY_FROM_LOGITS_WITH_CHUNKING:-True}
-    entropy_checkpointing=${ENTROPY_CHECKPOINTING:-True}
     total_epochs=${TOTAL_EPOCHS:-15}
     total_training_steps=${TOTAL_TRAINING_STEPS:-null}
     test_freq=${TEST_FREQ:-4}
@@ -68,9 +65,6 @@ else
     fsdp_strategy=${FSDP_STRATEGY:-fsdp}
     fsdp_size=${FSDP_SIZE:--1}
     sp_size=${SP_SIZE:-1}
-    use_torch_compile=${USE_TORCH_COMPILE:-True}
-    entropy_from_logits_with_chunking=${ENTROPY_FROM_LOGITS_WITH_CHUNKING:-False}
-    entropy_checkpointing=${ENTROPY_CHECKPOINTING:-False}
     total_epochs=${TOTAL_EPOCHS:-1}
     total_training_steps=${TOTAL_TRAINING_STEPS:-2}
     test_freq=${TEST_FREQ:--1}
@@ -166,15 +160,9 @@ ACTOR=(
     actor_rollout_ref.actor.policy_loss.clip_cov_ub=5.0
     actor_rollout_ref.actor.policy_loss.kl_cov_ratio=0.002
     actor_rollout_ref.actor.policy_loss.ppo_kl_coef=1.0
-    actor_rollout_ref.actor.strategy=${fsdp_strategy}
-    actor_rollout_ref.actor.use_torch_compile=${use_torch_compile}
-    actor_rollout_ref.actor.entropy_from_logits_with_chunking=${entropy_from_logits_with_chunking}
-    actor_rollout_ref.actor.entropy_checkpointing=${entropy_checkpointing}
     actor_rollout_ref.actor.fsdp_config.strategy=${fsdp_strategy}
     actor_rollout_ref.actor.fsdp_config.fsdp_size=${fsdp_size}
     actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size=${sp_size}
-    actor_rollout_ref.actor.fsdp_config.use_torch_compile=${use_torch_compile}
-    actor_rollout_ref.actor.fsdp_config.entropy_checkpointing=${entropy_checkpointing}
     actor_rollout_ref.actor.fsdp_config.param_offload=${actor_param_offload}
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=${actor_optimizer_offload}
 )
@@ -206,15 +194,9 @@ ROLLOUT=(
 )
 
 REF=(
-    actor_rollout_ref.ref.strategy=${fsdp_strategy}
-    actor_rollout_ref.ref.use_torch_compile=${use_torch_compile}
-    actor_rollout_ref.ref.entropy_from_logits_with_chunking=${entropy_from_logits_with_chunking}
-    actor_rollout_ref.ref.entropy_checkpointing=${entropy_checkpointing}
     actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${infer_max_token_len_per_gpu}
     actor_rollout_ref.ref.fsdp_config.ulysses_sequence_parallel_size=${sp_size}
-    actor_rollout_ref.ref.fsdp_config.use_torch_compile=${use_torch_compile}
-    actor_rollout_ref.ref.fsdp_config.entropy_checkpointing=${entropy_checkpointing}
     actor_rollout_ref.ref.fsdp_config.param_offload=${ref_param_offload}
 )
 
@@ -275,9 +257,6 @@ echo "  resume_mode: ${resume_mode}"
 echo "  fsdp_strategy: ${fsdp_strategy}"
 echo "  fsdp_size: ${fsdp_size}"
 echo "  sp_size: ${sp_size}"
-echo "  use_torch_compile: ${use_torch_compile}"
-echo "  entropy_from_logits_with_chunking: ${entropy_from_logits_with_chunking}"
-echo "  entropy_checkpointing: ${entropy_checkpointing}"
 echo "  actor_param_offload: ${actor_param_offload}"
 echo "  actor_optimizer_offload: ${actor_optimizer_offload}"
 echo "  ref_param_offload: ${ref_param_offload}"
