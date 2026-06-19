@@ -24,6 +24,7 @@ VAL_FILES=${VAL_FILES:-"['$HOME/data/entropy/aime-2024.parquet']"}
 if [ "${ENTROPY_REPRO_FULL:-0}" = "1" ]; then
     train_batch_size=${TRAIN_BATCH_SIZE:-256}
     ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE:-32}
+    ppo_micro_batch_size_per_gpu=${PPO_MICRO_BATCH_SIZE_PER_GPU:-1}
     rollout_n=${ROLLOUT_N:-8}
     rollout_gpu_mem_util=${ROLLOUT_GPU_MEM_UTIL:-0.45}
     max_prompt_length=${MAX_PROMPT_LENGTH:-2048}
@@ -32,6 +33,9 @@ if [ "${ENTROPY_REPRO_FULL:-0}" = "1" ]; then
     rollout_max_num_batched_tokens=${ROLLOUT_MAX_NUM_BATCHED_TOKENS:-${rollout_max_model_len}}
     rollout_enforce_eager=${ROLLOUT_ENFORCE_EAGER:-True}
     ppo_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU:-30720}
+    actor_param_offload=${ACTOR_PARAM_OFFLOAD:-True}
+    actor_optimizer_offload=${ACTOR_OPTIMIZER_OFFLOAD:-True}
+    ref_param_offload=${REF_PARAM_OFFLOAD:-True}
     total_epochs=${TOTAL_EPOCHS:-15}
     total_training_steps=${TOTAL_TRAINING_STEPS:-null}
     test_freq=${TEST_FREQ:-4}
@@ -41,6 +45,7 @@ if [ "${ENTROPY_REPRO_FULL:-0}" = "1" ]; then
 else
     train_batch_size=${TRAIN_BATCH_SIZE:-16}
     ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE:-8}
+    ppo_micro_batch_size_per_gpu=${PPO_MICRO_BATCH_SIZE_PER_GPU:-8}
     rollout_n=${ROLLOUT_N:-2}
     rollout_gpu_mem_util=${ROLLOUT_GPU_MEM_UTIL:-0.55}
     max_prompt_length=${MAX_PROMPT_LENGTH:-1024}
@@ -49,6 +54,9 @@ else
     rollout_max_model_len=${ROLLOUT_MAX_MODEL_LEN:-$((max_prompt_length + max_response_length))}
     rollout_max_num_batched_tokens=${ROLLOUT_MAX_NUM_BATCHED_TOKENS:-${ppo_max_token_len_per_gpu}}
     rollout_enforce_eager=${ROLLOUT_ENFORCE_EAGER:-False}
+    actor_param_offload=${ACTOR_PARAM_OFFLOAD:-False}
+    actor_optimizer_offload=${ACTOR_OPTIMIZER_OFFLOAD:-False}
+    ref_param_offload=${REF_PARAM_OFFLOAD:-False}
     total_epochs=${TOTAL_EPOCHS:-1}
     total_training_steps=${TOTAL_TRAINING_STEPS:-2}
     test_freq=${TEST_FREQ:--1}
@@ -126,7 +134,7 @@ ACTOR=(
     actor_rollout_ref.actor.optim.lr=${actor_lr}
     actor_rollout_ref.actor.optim.weight_decay=0
     actor_rollout_ref.actor.ppo_mini_batch_size=${ppo_mini_batch_size}
-    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=8
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=${ppo_micro_batch_size_per_gpu}
     actor_rollout_ref.actor.use_dynamic_bsz=True
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${ppo_max_token_len_per_gpu}
     actor_rollout_ref.actor.use_kl_loss=False
@@ -143,8 +151,8 @@ ACTOR=(
     actor_rollout_ref.actor.policy_loss.clip_cov_ub=5.0
     actor_rollout_ref.actor.policy_loss.kl_cov_ratio=0.002
     actor_rollout_ref.actor.policy_loss.ppo_kl_coef=1.0
-    actor_rollout_ref.actor.fsdp_config.param_offload=False
-    actor_rollout_ref.actor.fsdp_config.optimizer_offload=False
+    actor_rollout_ref.actor.fsdp_config.param_offload=${actor_param_offload}
+    actor_rollout_ref.actor.fsdp_config.optimizer_offload=${actor_optimizer_offload}
 )
 
 ROLLOUT=(
@@ -172,7 +180,7 @@ ROLLOUT=(
 REF=(
     actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${ppo_max_token_len_per_gpu}
-    actor_rollout_ref.ref.fsdp_config.param_offload=False
+    actor_rollout_ref.ref.fsdp_config.param_offload=${ref_param_offload}
 )
 
 REWARD=(
@@ -215,6 +223,7 @@ echo "  method: ${METHOD}"
 echo "  experiment: ${EXPERIMENT_NAME}"
 echo "  train_batch_size: ${train_batch_size}"
 echo "  ppo_mini_batch_size: ${ppo_mini_batch_size}"
+echo "  ppo_micro_batch_size_per_gpu: ${ppo_micro_batch_size_per_gpu}"
 echo "  rollout_n: ${rollout_n}"
 echo "  rollout_gpu_memory_utilization: ${rollout_gpu_mem_util}"
 echo "  rollout_max_model_len: ${rollout_max_model_len}"
@@ -227,6 +236,9 @@ echo "  total_training_steps: ${total_training_steps}"
 echo "  save_freq: ${save_freq}"
 echo "  test_freq: ${test_freq}"
 echo "  resume_mode: ${resume_mode}"
+echo "  actor_param_offload: ${actor_param_offload}"
+echo "  actor_optimizer_offload: ${actor_optimizer_offload}"
+echo "  ref_param_offload: ${ref_param_offload}"
 
 python3 -m verl.trainer.main_ppo \
     "${DATA[@]}" \
