@@ -33,7 +33,8 @@ if [ "${ENTROPY_REPRO_FULL:-0}" = "1" ]; then
     rollout_max_num_batched_tokens=${ROLLOUT_MAX_NUM_BATCHED_TOKENS:-${rollout_max_model_len}}
     rollout_enforce_eager=${ROLLOUT_ENFORCE_EAGER:-True}
     ppo_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU:-$((rollout_max_model_len * 2))}
-    infer_max_token_len_per_gpu=${INFER_MAX_TOKEN_LEN_PER_GPU:-$((rollout_max_model_len * 3))}
+    infer_max_token_len_per_gpu=${INFER_MAX_TOKEN_LEN_PER_GPU:-${rollout_max_model_len}}
+    log_prob_micro_batch_size_per_gpu=${LOG_PROB_MICRO_BATCH_SIZE_PER_GPU:-1}
     actor_param_offload=${ACTOR_PARAM_OFFLOAD:-True}
     actor_optimizer_offload=${ACTOR_OPTIMIZER_OFFLOAD:-True}
     ref_param_offload=${REF_PARAM_OFFLOAD:-True}
@@ -59,6 +60,7 @@ else
     max_response_length=${MAX_RESPONSE_LENGTH:-1024}
     ppo_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU:-8192}
     infer_max_token_len_per_gpu=${INFER_MAX_TOKEN_LEN_PER_GPU:-${ppo_max_token_len_per_gpu}}
+    log_prob_micro_batch_size_per_gpu=${LOG_PROB_MICRO_BATCH_SIZE_PER_GPU:-1}
     rollout_max_model_len=${ROLLOUT_MAX_MODEL_LEN:-$((max_prompt_length + max_response_length))}
     rollout_max_num_batched_tokens=${ROLLOUT_MAX_NUM_BATCHED_TOKENS:-${ppo_max_token_len_per_gpu}}
     rollout_enforce_eager=${ROLLOUT_ENFORCE_EAGER:-False}
@@ -198,6 +200,7 @@ ROLLOUT=(
     actor_rollout_ref.rollout.top_k=-1
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${infer_max_token_len_per_gpu}
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=${log_prob_micro_batch_size_per_gpu}
     actor_rollout_ref.rollout.val_kwargs.temperature=0
     actor_rollout_ref.rollout.val_kwargs.top_p=1.0
     actor_rollout_ref.rollout.val_kwargs.top_k=-1
@@ -212,6 +215,7 @@ REF=(
     actor_rollout_ref.ref.entropy_checkpointing=${entropy_checkpointing}
     actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${infer_max_token_len_per_gpu}
+    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${log_prob_micro_batch_size_per_gpu}
     actor_rollout_ref.ref.fsdp_config.ulysses_sequence_parallel_size=${sp_size}
     actor_rollout_ref.ref.fsdp_config.use_torch_compile=${use_torch_compile}
     actor_rollout_ref.ref.fsdp_config.entropy_checkpointing=${entropy_checkpointing}
@@ -268,6 +272,7 @@ echo "  max_prompt_length: ${max_prompt_length}"
 echo "  max_response_length: ${max_response_length}"
 echo "  ppo_max_token_len_per_gpu: ${ppo_max_token_len_per_gpu}"
 echo "  infer_max_token_len_per_gpu: ${infer_max_token_len_per_gpu}"
+echo "  log_prob_micro_batch_size_per_gpu: ${log_prob_micro_batch_size_per_gpu}"
 echo "  total_training_steps: ${total_training_steps}"
 echo "  save_freq: ${save_freq}"
 echo "  test_freq: ${test_freq}"
