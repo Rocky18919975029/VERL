@@ -28,6 +28,9 @@ if [ "${ENTROPY_REPRO_FULL:-0}" = "1" ]; then
     rollout_gpu_mem_util=${ROLLOUT_GPU_MEM_UTIL:-0.45}
     max_prompt_length=${MAX_PROMPT_LENGTH:-2048}
     max_response_length=${MAX_RESPONSE_LENGTH:-8192}
+    rollout_max_model_len=${ROLLOUT_MAX_MODEL_LEN:-$((max_prompt_length + max_response_length))}
+    rollout_max_num_batched_tokens=${ROLLOUT_MAX_NUM_BATCHED_TOKENS:-${rollout_max_model_len}}
+    rollout_enforce_eager=${ROLLOUT_ENFORCE_EAGER:-True}
     ppo_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU:-30720}
     total_epochs=${TOTAL_EPOCHS:-15}
     total_training_steps=${TOTAL_TRAINING_STEPS:-null}
@@ -43,6 +46,9 @@ else
     max_prompt_length=${MAX_PROMPT_LENGTH:-1024}
     max_response_length=${MAX_RESPONSE_LENGTH:-1024}
     ppo_max_token_len_per_gpu=${PPO_MAX_TOKEN_LEN_PER_GPU:-8192}
+    rollout_max_model_len=${ROLLOUT_MAX_MODEL_LEN:-$((max_prompt_length + max_response_length))}
+    rollout_max_num_batched_tokens=${ROLLOUT_MAX_NUM_BATCHED_TOKENS:-${ppo_max_token_len_per_gpu}}
+    rollout_enforce_eager=${ROLLOUT_ENFORCE_EAGER:-False}
     total_epochs=${TOTAL_EPOCHS:-1}
     total_training_steps=${TOTAL_TRAINING_STEPS:-2}
     test_freq=${TEST_FREQ:--1}
@@ -146,7 +152,10 @@ ROLLOUT=(
     actor_rollout_ref.rollout.tensor_model_parallel_size=${rollout_tp}
     actor_rollout_ref.rollout.gpu_memory_utilization=${rollout_gpu_mem_util}
     actor_rollout_ref.rollout.enable_chunked_prefill=True
-    actor_rollout_ref.rollout.max_num_batched_tokens=${ppo_max_token_len_per_gpu}
+    actor_rollout_ref.rollout.max_model_len=${rollout_max_model_len}
+    actor_rollout_ref.rollout.max_num_batched_tokens=${rollout_max_num_batched_tokens}
+    actor_rollout_ref.rollout.enforce_eager=${rollout_enforce_eager}
+    actor_rollout_ref.rollout.free_cache_engine=True
     actor_rollout_ref.rollout.n=${rollout_n}
     actor_rollout_ref.rollout.temperature=1.0
     actor_rollout_ref.rollout.top_p=1.0
@@ -208,6 +217,9 @@ echo "  train_batch_size: ${train_batch_size}"
 echo "  ppo_mini_batch_size: ${ppo_mini_batch_size}"
 echo "  rollout_n: ${rollout_n}"
 echo "  rollout_gpu_memory_utilization: ${rollout_gpu_mem_util}"
+echo "  rollout_max_model_len: ${rollout_max_model_len}"
+echo "  rollout_max_num_batched_tokens: ${rollout_max_num_batched_tokens}"
+echo "  rollout_enforce_eager: ${rollout_enforce_eager}"
 echo "  max_prompt_length: ${max_prompt_length}"
 echo "  max_response_length: ${max_response_length}"
 echo "  ppo_max_token_len_per_gpu: ${ppo_max_token_len_per_gpu}"
