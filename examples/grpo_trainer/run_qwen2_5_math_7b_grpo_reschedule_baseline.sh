@@ -130,6 +130,7 @@ TRAINER_COMMON=(
     trainer.n_gpus_per_node=${NGPUS_PER_NODE}
     trainer.nnodes=${NNODES}
     trainer.critic_warmup=0
+    trainer.val_before_train=False
     trainer.save_freq=${SAVE_FREQ:-10}
     trainer.test_freq=${TEST_FREQ:-1}
     trainer.total_epochs=${TOTAL_EPOCHS}
