@@ -136,12 +136,29 @@ echo "Model: ${MODEL_PATH}"
 echo "Data dir: ${DATA_DIR}"
 echo "Total training steps: ${TOTAL_TRAINING_STEPS:-150}"
 
+# The released Re-Schedule script leaves these off and uses vLLM memory 0.6.
+# On this ACD 8xH100 colocated setup that OOMs when vLLM wakes up to sync
+# actor weights, so the Slurm launcher uses safer placement defaults. Override
+# these when intentionally testing the exact released engineering placement.
+ACTOR_PARAM_OFFLOAD=${ACTOR_PARAM_OFFLOAD:-True}
+ACTOR_OPTIMIZER_OFFLOAD=${ACTOR_OPTIMIZER_OFFLOAD:-True}
+REF_PARAM_OFFLOAD=${REF_PARAM_OFFLOAD:-True}
+ROLLOUT_GPU_MEMORY_UTILIZATION=${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.45}
+echo "Actor param offload: ${ACTOR_PARAM_OFFLOAD}"
+echo "Actor optimizer offload: ${ACTOR_OPTIMIZER_OFFLOAD}"
+echo "Ref param offload: ${REF_PARAM_OFFLOAD}"
+echo "vLLM GPU memory utilization: ${ROLLOUT_GPU_MEMORY_UTILIZATION}"
+
 MODEL_PATH="${MODEL_PATH}" \
 DATA_DIR="${DATA_DIR}" \
 PROJECT_NAME="${PROJECT_NAME}" \
 RUN_NAME="${EXPERIMENT_NAME}" \
 MODE="${MODE:-train}" \
 TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-150}" \
+ACTOR_PARAM_OFFLOAD="${ACTOR_PARAM_OFFLOAD}" \
+ACTOR_OPTIMIZER_OFFLOAD="${ACTOR_OPTIMIZER_OFFLOAD}" \
+REF_PARAM_OFFLOAD="${REF_PARAM_OFFLOAD}" \
+ROLLOUT_GPU_MEMORY_UTILIZATION="${ROLLOUT_GPU_MEMORY_UTILIZATION}" \
 NNODES=1 \
 NGPUS_PER_NODE=8 \
 bash examples/grpo_trainer/run_qwen2_5_math_7b_grpo_reschedule_baseline.sh "$@"
