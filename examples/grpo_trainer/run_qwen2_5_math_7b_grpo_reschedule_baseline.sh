@@ -45,6 +45,7 @@ TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-150}
 TOTAL_EPOCHS=${TOTAL_EPOCHS:-50}
 
 ACTOR_LR=${ACTOR_LR:-1e-6}
+ATTN_IMPLEMENTATION=${ATTN_IMPLEMENTATION:-sdpa}
 ROLLOUT_TP=${ROLLOUT_TP:-4}
 ROLLOUT_GPU_MEMORY_UTILIZATION=${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.6}
 ROLLOUT_TRAIN_TEMPERATURE=${ROLLOUT_TRAIN_TEMPERATURE:-1.0}
@@ -85,6 +86,7 @@ COMMON_DATA=(
 
 MODEL=(
     actor_rollout_ref.model.path="${MODEL_PATH}"
+    +actor_rollout_ref.model.override_config.attn_implementation=${ATTN_IMPLEMENTATION}
     actor_rollout_ref.model.use_remove_padding=True
     actor_rollout_ref.model.enable_gradient_checkpointing=True
 )
