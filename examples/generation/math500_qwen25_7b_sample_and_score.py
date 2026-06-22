@@ -187,7 +187,7 @@ def main() -> None:
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
     tokenizer = AutoTokenizer.from_pretrained(args.model, local_files_only=True, trust_remote_code=True)
-    df = pd.read_parquet(args.data)
+    df = pd.read_parquet(args.data).reset_index(names="original_problem_index")
     if args.limit is not None:
         df = df.head(args.limit)
     if args.num_shards < 1:
@@ -228,7 +228,8 @@ def main() -> None:
             full_ids = token_ids(tokenizer, full_text)
             response_ids = full_ids[len(prompt_ids) :]
             row = {
-                "problem_index": int(problem_idx),
+                "problem_index": int(source_row.get("original_problem_index", problem_idx)),
+                "shard_local_problem_index": int(problem_idx),
                 "sample_index": int(sample_idx),
                 "data_source": str(source_row.get("data_source", "")),
                 "ability": str(source_row.get("ability", "")),

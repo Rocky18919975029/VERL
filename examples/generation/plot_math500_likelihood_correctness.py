@@ -49,6 +49,10 @@ def load_rows(input_dir: Path) -> pd.DataFrame:
         raise ValueError(f"Missing required columns: {sorted(missing)}")
     df = df.dropna(subset=["model_avg_log_likelihood", "is_correct"]).copy()
     df["is_correct"] = df["is_correct"].astype(bool)
+    if "raw_problem" in df.columns and df["raw_problem"].notna().any():
+        df["problem_key"] = df["raw_problem"].astype(str)
+    else:
+        df["problem_key"] = df["problem_index"].astype(str)
     return df
 
 
@@ -59,7 +63,7 @@ def write_summary(df: pd.DataFrame, output_dir: Path, bins: int) -> None:
     incorrect = df[~df["is_correct"]]
     summary = {
         "num_responses": int(len(df)),
-        "num_problems": int(df["problem_index"].nunique()),
+        "num_problems": int(df["problem_key"].nunique()),
         "num_correct": int(df["is_correct"].sum()),
         "accuracy": float(df["is_correct"].mean()),
         "pearson_corr_likelihood_correct": None if pd.isna(corr) else float(corr),
@@ -282,8 +286,10 @@ def plot_binned_accuracy(df: pd.DataFrame, output_dir: Path, bins: int) -> None:
 
 def plot_problem_level(df: pd.DataFrame, output_dir: Path) -> None:
     problem = (
-        df.groupby("problem_index")
+        df.groupby("problem_key")
         .agg(
+            problem_index=("problem_index", "first"),
+            raw_problem=("raw_problem", "first") if "raw_problem" in df.columns else ("problem_key", "first"),
             mean_likelihood=("model_avg_log_likelihood", "mean"),
             best_likelihood=("model_avg_log_likelihood", "max"),
             any_correct=("is_correct", "max"),
