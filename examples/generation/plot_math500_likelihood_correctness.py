@@ -4,11 +4,17 @@
 from __future__ import annotations
 
 import argparse
+import html
 import json
 from pathlib import Path
 
-import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
+
+try:
+    import matplotlib.pyplot as plt
+except ModuleNotFoundError:
+    plt = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -69,7 +75,124 @@ def write_summary(df: pd.DataFrame, output_dir: Path, bins: int) -> None:
     )
 
 
+def scale(value: float, src_min: float, src_max: float, dst_min: float, dst_max: float) -> float:
+    if src_max == src_min:
+        return (dst_min + dst_max) / 2
+    return dst_min + (value - src_min) * (dst_max - dst_min) / (src_max - src_min)
+
+
+def svg_header(width: int, height: int, title: str) -> list[str]:
+    return [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+        '<rect width="100%" height="100%" fill="white"/>',
+        f'<text x="{width / 2}" y="28" text-anchor="middle" font-family="Arial" font-size="18">{html.escape(title)}</text>',
+    ]
+
+
+def svg_axes(parts: list[str], width: int, height: int, xlabel: str, ylabel: str) -> tuple[int, int, int, int]:
+    left, top, right, bottom = 70, 50, width - 25, height - 55
+    parts.extend(
+        [
+            f'<line x1="{left}" y1="{bottom}" x2="{right}" y2="{bottom}" stroke="#333"/>',
+            f'<line x1="{left}" y1="{top}" x2="{left}" y2="{bottom}" stroke="#333"/>',
+            f'<text x="{(left + right) / 2}" y="{height - 15}" text-anchor="middle" font-family="Arial" font-size="12">{html.escape(xlabel)}</text>',
+            f'<text x="18" y="{(top + bottom) / 2}" text-anchor="middle" transform="rotate(-90 18 {(top + bottom) / 2})" font-family="Arial" font-size="12">{html.escape(ylabel)}</text>',
+        ]
+    )
+    return left, top, right, bottom
+
+
+def write_line_svg(path: Path, x: pd.Series, y: pd.Series, title: str, xlabel: str, ylabel: str) -> None:
+    width, height = 850, 520
+    parts = svg_header(width, height, title)
+    left, top, right, bottom = svg_axes(parts, width, height, xlabel, ylabel)
+    x_min, x_max = float(x.min()), float(x.max())
+    y_min, y_max = min(0.0, float(y.min())), max(1.0, float(y.max()))
+    points = []
+    for xv, yv in zip(x, y, strict=True):
+        px = scale(float(xv), x_min, x_max, left, right)
+        py = scale(float(yv), y_min, y_max, bottom, top)
+        points.append((px, py))
+    point_str = " ".join(f"{px:.1f},{py:.1f}" for px, py in points)
+    parts.append(f'<polyline points="{point_str}" fill="none" stroke="#2563eb" stroke-width="2"/>')
+    for px, py in points:
+        parts.append(f'<circle cx="{px:.1f}" cy="{py:.1f}" r="3" fill="#2563eb"/>')
+    parts.append("</svg>")
+    path.write_text("\n".join(parts), encoding="utf-8")
+
+
+def write_scatter_svg(path: Path, x: pd.Series, y: pd.Series, title: str, xlabel: str, ylabel: str) -> None:
+    width, height = 850, 520
+    parts = svg_header(width, height, title)
+    left, top, right, bottom = svg_axes(parts, width, height, xlabel, ylabel)
+    x_min, x_max = float(x.min()), float(x.max())
+    y_min, y_max = min(0.0, float(y.min())), max(1.0, float(y.max()))
+    for xv, yv in zip(x, y, strict=True):
+        px = scale(float(xv), x_min, x_max, left, right)
+        py = scale(float(yv), y_min, y_max, bottom, top)
+        parts.append(f'<circle cx="{px:.1f}" cy="{py:.1f}" r="3" fill="#16a34a" opacity="0.55"/>')
+    parts.append("</svg>")
+    path.write_text("\n".join(parts), encoding="utf-8")
+
+
+def write_hist_svg(path: Path, incorrect: pd.Series, correct: pd.Series) -> None:
+    width, height = 850, 520
+    parts = svg_header(width, height, "Math-500 likelihood distributions")
+    left, top, right, bottom = svg_axes(
+        parts, width, height, "Response-length-normalized model log likelihood", "Count"
+    )
+    all_values = pd.concat([incorrect, correct])
+    counts_i, edges = np.histogram(incorrect, bins=40, range=(float(all_values.min()), float(all_values.max())))
+    counts_c, _ = np.histogram(correct, bins=edges)
+    max_count = max(int(counts_i.max()), int(counts_c.max()), 1)
+    bar_w = (right - left) / len(counts_i)
+    for idx, count in enumerate(counts_i):
+        h = scale(float(count), 0, max_count, 0, bottom - top)
+        x = left + idx * bar_w
+        parts.append(f'<rect x="{x:.1f}" y="{bottom - h:.1f}" width="{bar_w:.1f}" height="{h:.1f}" fill="#ef4444" opacity="0.45"/>')
+    for idx, count in enumerate(counts_c):
+        h = scale(float(count), 0, max_count, 0, bottom - top)
+        x = left + idx * bar_w
+        parts.append(f'<rect x="{x:.1f}" y="{bottom - h:.1f}" width="{bar_w:.1f}" height="{h:.1f}" fill="#2563eb" opacity="0.45"/>')
+    parts.append('<text x="650" y="72" font-family="Arial" font-size="12" fill="#ef4444">Incorrect</text>')
+    parts.append('<text x="650" y="92" font-family="Arial" font-size="12" fill="#2563eb">Correct</text>')
+    parts.append("</svg>")
+    path.write_text("\n".join(parts), encoding="utf-8")
+
+
+def write_box_svg(path: Path, df: pd.DataFrame) -> None:
+    width, height = 760, 480
+    parts = svg_header(width, height, "Math-500: normalized log likelihood by correctness")
+    left, top, right, bottom = svg_axes(
+        parts, width, height, "Group", "Response-length-normalized model log likelihood"
+    )
+    groups = [("Incorrect", df.loc[~df["is_correct"], "model_avg_log_likelihood"]), ("Correct", df.loc[df["is_correct"], "model_avg_log_likelihood"])]
+    all_values = df["model_avg_log_likelihood"]
+    y_min, y_max = float(all_values.min()), float(all_values.max())
+    for idx, (label, values) in enumerate(groups):
+        if values.empty:
+            continue
+        q1, med, q3 = values.quantile([0.25, 0.5, 0.75]).tolist()
+        vmin, vmax = float(values.min()), float(values.max())
+        cx = left + (idx + 1) * (right - left) / 3
+        box_w = 95
+        yq1 = scale(float(q1), y_min, y_max, bottom, top)
+        yq3 = scale(float(q3), y_min, y_max, bottom, top)
+        ymed = scale(float(med), y_min, y_max, bottom, top)
+        ymin = scale(vmin, y_min, y_max, bottom, top)
+        ymax = scale(vmax, y_min, y_max, bottom, top)
+        parts.append(f'<line x1="{cx:.1f}" y1="{ymax:.1f}" x2="{cx:.1f}" y2="{ymin:.1f}" stroke="#333"/>')
+        parts.append(f'<rect x="{cx - box_w / 2:.1f}" y="{yq3:.1f}" width="{box_w}" height="{max(1, yq1 - yq3):.1f}" fill="#bfdbfe" stroke="#2563eb"/>')
+        parts.append(f'<line x1="{cx - box_w / 2:.1f}" y1="{ymed:.1f}" x2="{cx + box_w / 2:.1f}" y2="{ymed:.1f}" stroke="#1d4ed8" stroke-width="2"/>')
+        parts.append(f'<text x="{cx:.1f}" y="{bottom + 24}" text-anchor="middle" font-family="Arial" font-size="12">{label}</text>')
+    parts.append("</svg>")
+    path.write_text("\n".join(parts), encoding="utf-8")
+
+
 def plot_box(df: pd.DataFrame, output_dir: Path) -> None:
+    if plt is None:
+        write_box_svg(output_dir / "likelihood_by_correctness_box.svg", df)
+        return
     data = [
         df.loc[~df["is_correct"], "model_avg_log_likelihood"].to_numpy(),
         df.loc[df["is_correct"], "model_avg_log_likelihood"].to_numpy(),
@@ -85,6 +208,13 @@ def plot_box(df: pd.DataFrame, output_dir: Path) -> None:
 
 
 def plot_hist(df: pd.DataFrame, output_dir: Path) -> None:
+    if plt is None:
+        write_hist_svg(
+            output_dir / "likelihood_correctness_hist.svg",
+            df.loc[~df["is_correct"], "model_avg_log_likelihood"],
+            df.loc[df["is_correct"], "model_avg_log_likelihood"],
+        )
+        return
     plt.figure(figsize=(8, 5))
     plt.hist(
         df.loc[~df["is_correct"], "model_avg_log_likelihood"],
@@ -126,6 +256,17 @@ def plot_binned_accuracy(df: pd.DataFrame, output_dir: Path, bins: int) -> None:
     )
     grouped.to_csv(output_dir / "likelihood_binned_accuracy.csv", index=False)
 
+    if plt is None:
+        write_line_svg(
+            output_dir / "likelihood_binned_accuracy.svg",
+            grouped["mean_likelihood"],
+            grouped["accuracy"],
+            "Math-500 correctness rate by likelihood bin",
+            "Mean normalized log likelihood in bin",
+            "Accuracy",
+        )
+        return
+
     plt.figure(figsize=(8, 5))
     plt.plot(grouped["mean_likelihood"], grouped["accuracy"], marker="o")
     for _, row in grouped.iterrows():
@@ -152,6 +293,17 @@ def plot_problem_level(df: pd.DataFrame, output_dir: Path) -> None:
         .reset_index()
     )
     problem.to_csv(output_dir / "problem_level_likelihood_correctness.csv", index=False)
+
+    if plt is None:
+        write_scatter_svg(
+            output_dir / "problem_level_likelihood_accuracy.svg",
+            problem["mean_likelihood"],
+            problem["accuracy"],
+            "Math-500 problem-level likelihood vs correctness",
+            "Mean normalized log likelihood over 16 responses",
+            "Problem-level accuracy over 16 responses",
+        )
+        return
 
     plt.figure(figsize=(8, 5))
     plt.scatter(problem["mean_likelihood"], problem["accuracy"], alpha=0.65, s=22)
