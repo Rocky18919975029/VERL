@@ -202,7 +202,10 @@ def plot_box(df: pd.DataFrame, output_dir: Path) -> None:
         df.loc[df["is_correct"], "model_avg_log_likelihood"].to_numpy(),
     ]
     plt.figure(figsize=(7, 5))
-    plt.boxplot(data, labels=["Incorrect", "Correct"], showmeans=True)
+    try:
+        plt.boxplot(data, tick_labels=["Incorrect", "Correct"], showmeans=True)
+    except TypeError:
+        plt.boxplot(data, labels=["Incorrect", "Correct"], showmeans=True)
     plt.ylabel("Response-length-normalized model log likelihood")
     plt.title("Math-500: normalized log likelihood by correctness")
     plt.grid(axis="y", alpha=0.3)
