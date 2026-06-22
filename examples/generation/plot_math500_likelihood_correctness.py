@@ -61,11 +61,64 @@ def write_summary(df: pd.DataFrame, output_dir: Path, bins: int) -> None:
     spearman = df["model_avg_log_likelihood"].corr(df["is_correct"].astype(float), method="spearman")
     correct = df[df["is_correct"]]
     incorrect = df[~df["is_correct"]]
+    top_by_likelihood = (
+        df.sort_values(["problem_key", "model_avg_log_likelihood"], ascending=[True, False])
+        .groupby("problem_key", as_index=False)
+        .first()
+    )
+    per_problem = (
+        df.groupby("problem_key")
+        .agg(
+            problem_index=("problem_index", "first"),
+            raw_problem=("raw_problem", "first") if "raw_problem" in df.columns else ("problem_key", "first"),
+            ground_truth=("ground_truth", "first") if "ground_truth" in df.columns else ("problem_key", "first"),
+            num_responses=("is_correct", "size"),
+            num_correct=("is_correct", "sum"),
+            oracle_correct=("is_correct", "max"),
+            response_accuracy=("is_correct", "mean"),
+            mean_likelihood=("model_avg_log_likelihood", "mean"),
+            max_likelihood=("model_avg_log_likelihood", "max"),
+        )
+        .reset_index()
+    )
+    top_cols = [
+        "problem_key",
+        "sample_index",
+        "response",
+        "model_avg_log_likelihood",
+        "model_log_likelihood",
+        "response_token_len",
+        "is_correct",
+        "extracted_answer",
+    ]
+    available_top_cols = [col for col in top_cols if col in top_by_likelihood.columns]
+    top_export = top_by_likelihood[available_top_cols].rename(
+        columns={
+            "sample_index": "top_likelihood_sample_index",
+            "response": "top_likelihood_response",
+            "model_avg_log_likelihood": "top_likelihood_avg_log_likelihood",
+            "model_log_likelihood": "top_likelihood_log_likelihood",
+            "response_token_len": "top_likelihood_response_token_len",
+            "is_correct": "top_likelihood_is_correct",
+            "extracted_answer": "top_likelihood_extracted_answer",
+        }
+    )
+    per_problem = per_problem.merge(top_export, on="problem_key", how="left")
+    per_problem.to_csv(output_dir / "top_likelihood_per_problem.csv", index=False)
+
+    top1_acc = float(top_by_likelihood["is_correct"].mean()) if not top_by_likelihood.empty else None
+    oracle_acc = float(per_problem["oracle_correct"].mean()) if not per_problem.empty else None
+    mean_response_acc_per_problem = float(per_problem["response_accuracy"].mean()) if not per_problem.empty else None
+
     summary = {
         "num_responses": int(len(df)),
         "num_problems": int(df["problem_key"].nunique()),
         "num_correct": int(df["is_correct"].sum()),
         "accuracy": float(df["is_correct"].mean()),
+        "top_likelihood_accuracy": top1_acc,
+        "oracle_accuracy_at_16": oracle_acc,
+        "mean_per_problem_response_accuracy": mean_response_acc_per_problem,
+        "top_likelihood_num_correct": int(top_by_likelihood["is_correct"].sum()) if not top_by_likelihood.empty else 0,
         "pearson_corr_likelihood_correct": None if pd.isna(corr) else float(corr),
         "spearman_corr_likelihood_correct": None if pd.isna(spearman) else float(spearman),
         "mean_likelihood_correct": None if correct.empty else float(correct["model_avg_log_likelihood"].mean()),
@@ -325,6 +378,39 @@ def plot_problem_level(df: pd.DataFrame, output_dir: Path) -> None:
     plt.close()
 
 
+def plot_top_likelihood_selection(output_dir: Path) -> None:
+    path = output_dir / "top_likelihood_per_problem.csv"
+    if not path.exists():
+        return
+    top = pd.read_csv(path)
+    if "top_likelihood_avg_log_likelihood" not in top.columns or "top_likelihood_is_correct" not in top.columns:
+        return
+    top["top_likelihood_is_correct"] = top["top_likelihood_is_correct"].astype(bool)
+
+    if plt is None:
+        write_scatter_svg(
+            output_dir / "top_likelihood_selection.svg",
+            top["top_likelihood_avg_log_likelihood"],
+            top["top_likelihood_is_correct"].astype(float),
+            "Top-likelihood response correctness per problem",
+            "Top response normalized log likelihood",
+            "Correct",
+        )
+        return
+
+    plt.figure(figsize=(8, 4.8))
+    y = top["top_likelihood_is_correct"].astype(float)
+    plt.scatter(top["top_likelihood_avg_log_likelihood"], y, alpha=0.6, s=20)
+    plt.yticks([0, 1], ["Incorrect", "Correct"])
+    plt.xlabel("Top response normalized log likelihood")
+    plt.ylabel("Top-likelihood response correctness")
+    plt.title("Math-500: whether top-likelihood response is correct")
+    plt.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(output_dir / "top_likelihood_selection.png", dpi=200)
+    plt.close()
+
+
 def main() -> None:
     args = parse_args()
     input_dir = Path(args.input_dir)
@@ -338,6 +424,7 @@ def main() -> None:
     plot_hist(df, output_dir)
     plot_binned_accuracy(df, output_dir, args.bins)
     plot_problem_level(df, output_dir)
+    plot_top_likelihood_selection(output_dir)
     print(f"Wrote plots and summaries to {output_dir}")
 
 
