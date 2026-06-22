@@ -52,6 +52,19 @@ cd "${VERL_WORKDIR}"
 MODEL_PATH=${MODEL_PATH:-/data/user/zhongal/.cache/qwen2.5-7b-local}
 MATH500_FILE=${MATH500_FILE:-/data/user/zhongal/data/reschedule/math500.parquet}
 OUTPUT_DIR=${OUTPUT_DIR:-${VERL_WORKDIR}/outputs/math500_qwen25_7b_temp025_n16_${SLURM_JOB_ID}}
+NUM_SHARDS=${NUM_SHARDS:-2}
+GPUS_PER_SHARD=${GPUS_PER_SHARD:-4}
+TENSOR_PARALLEL_SIZE=${TENSOR_PARALLEL_SIZE:-4}
+
+if [ "${TENSOR_PARALLEL_SIZE}" -ne "${GPUS_PER_SHARD}" ]; then
+    echo "TENSOR_PARALLEL_SIZE must match GPUS_PER_SHARD for this launcher." >&2
+    echo "Got TENSOR_PARALLEL_SIZE=${TENSOR_PARALLEL_SIZE}, GPUS_PER_SHARD=${GPUS_PER_SHARD}" >&2
+    exit 1
+fi
+if [ $((NUM_SHARDS * GPUS_PER_SHARD)) -gt 8 ]; then
+    echo "Requested more than 8 GPUs: NUM_SHARDS=${NUM_SHARDS}, GPUS_PER_SHARD=${GPUS_PER_SHARD}" >&2
+    exit 1
+fi
 
 if [ ! -d "${MODEL_PATH}" ]; then
     echo "Local model directory not found: ${MODEL_PATH}" >&2
@@ -96,23 +109,46 @@ echo "Working directory: ${VERL_WORKDIR}"
 echo "Model: ${MODEL_PATH}"
 echo "Math-500 file: ${MATH500_FILE}"
 echo "Output dir: ${OUTPUT_DIR}"
+echo "Num shards: ${NUM_SHARDS}"
+echo "GPUs per shard: ${GPUS_PER_SHARD}"
+echo "Tensor parallel size: ${TENSOR_PARALLEL_SIZE}"
 
 ARGS=(
     --model "${MODEL_PATH}"
     --data "${MATH500_FILE}"
-    --output-dir "${OUTPUT_DIR}"
     --temperature "${TEMPERATURE:-0.25}"
     --top-p "${TOP_P:-1.0}"
     --n "${N_RESPONSES:-16}"
     --max-tokens "${MAX_TOKENS:-3072}"
-    --tensor-parallel-size "${TENSOR_PARALLEL_SIZE:-8}"
+    --tensor-parallel-size "${TENSOR_PARALLEL_SIZE}"
     --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION:-0.9}"
     --dtype "${DTYPE:-bfloat16}"
     --seed "${SEED:-42}"
     --score-batch-size "${SCORE_BATCH_SIZE:-64}"
+    --num-shards "${NUM_SHARDS}"
 )
 if [ -n "${LIMIT:-}" ]; then
     ARGS+=(--limit "${LIMIT}")
 fi
 
-python examples/generation/math500_qwen25_7b_sample_and_score.py "${ARGS[@]}"
+pids=()
+for ((shard = 0; shard < NUM_SHARDS; shard++)); do
+    first_gpu=$((shard * GPUS_PER_SHARD))
+    last_gpu=$((first_gpu + GPUS_PER_SHARD - 1))
+    visible_devices=$(seq -s, "${first_gpu}" "${last_gpu}")
+    shard_output_dir="${OUTPUT_DIR}/shard_${shard}"
+    mkdir -p "${shard_output_dir}"
+    echo "Launching shard ${shard}/${NUM_SHARDS} on CUDA_VISIBLE_DEVICES=${visible_devices}"
+    CUDA_VISIBLE_DEVICES="${visible_devices}" \
+        python examples/generation/math500_qwen25_7b_sample_and_score.py \
+            "${ARGS[@]}" \
+            --shard-index "${shard}" \
+            --output-dir "${shard_output_dir}" &
+    pids+=("$!")
+done
+
+for pid in "${pids[@]}"; do
+    wait "${pid}"
+done
+
+echo "All shards completed. Outputs are under ${OUTPUT_DIR}"

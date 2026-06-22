@@ -42,6 +42,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--score-batch-size", type=int, default=64)
     parser.add_argument("--limit", type=int, default=None, help="Optional row limit for debugging.")
+    parser.add_argument("--num-shards", type=int, default=1, help="Split dataset into this many interleaved shards.")
+    parser.add_argument("--shard-index", type=int, default=0, help="Current shard index in [0, num_shards).")
     return parser.parse_args()
 
 
@@ -185,6 +187,11 @@ def main() -> None:
     df = pd.read_parquet(args.data)
     if args.limit is not None:
         df = df.head(args.limit)
+    if args.num_shards < 1:
+        raise ValueError(f"--num-shards must be >= 1, got {args.num_shards}")
+    if not 0 <= args.shard_index < args.num_shards:
+        raise ValueError(f"--shard-index must be in [0, {args.num_shards}), got {args.shard_index}")
+    df = df.iloc[args.shard_index :: args.num_shards].reset_index(drop=True)
 
     prompts: list[str] = [render_prompt(tokenizer, row["prompt"]) for _, row in df.iterrows()]
 
@@ -286,6 +293,8 @@ def main() -> None:
         "model": args.model,
         "data": args.data,
         "num_problems": len(df),
+        "num_shards": args.num_shards,
+        "shard_index": args.shard_index,
         "responses_per_problem": args.n,
         "num_responses": len(rows),
         "temperature": args.temperature,
