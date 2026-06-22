@@ -41,6 +41,7 @@ from verl.trainer.config import AlgoConfig
 from verl.trainer.distillation.losses import is_distillation_enabled
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
+from verl.trainer.ppo.hpf_utils import build_hpf_masked_batches
 from verl.trainer.ppo.metric_utils import (
     compute_data_metrics,
     compute_throughout_metrics,
@@ -1356,6 +1357,33 @@ class RayPPOTrainer:
 
         return actor_output
 
+    def _update_actor_hpf_masked_grpo(self, batch: DataProto) -> DataProto:
+        hpf_config = self.config.algorithm.get("hpf_rlvr", {})
+        progressive_block_size = int(hpf_config.get("progressive_block_size", 256))
+        max_response_length = int(hpf_config.get("max_response_length", self.config.data.max_response_length))
+        epsilon = float(hpf_config.get("epsilon", 1e-6))
+        std_normalize = bool(
+            hpf_config.get("std_normalize", self.config.algorithm.get("norm_adv_by_std_in_grpo", True))
+        )
+        follower_batch, leader_batch = build_hpf_masked_batches(
+            batch=batch,
+            round_index=self.global_steps,
+            progressive_block_size=progressive_block_size,
+            max_response_length=max_response_length,
+            epsilon=epsilon,
+            std_normalize=std_normalize,
+        )
+        metrics = dict(leader_batch.metrics)
+        if follower_batch is not None:
+            follower_output = self._update_actor(follower_batch.batch)
+            follower_metrics = reduce_metrics(follower_output.meta_info["metrics"])
+            metrics.update(rename_dict(follower_metrics, "hpf/follower/"))
+            metrics.update(follower_batch.metrics)
+        leader_output = self._update_actor(leader_batch.batch)
+        leader_metrics = reduce_metrics(leader_output.meta_info["metrics"])
+        metrics.update(rename_dict(leader_metrics, "hpf/leader/"))
+        return DataProto.from_single_dict(data={}, meta_info={"metrics": metrics})
+
     def _update_critic(self, batch: DataProto) -> DataProto:
         batch_td = batch.to_tensordict()
         # step 2: convert from padding to no-padding
@@ -1671,7 +1699,10 @@ class RayPPOTrainer:
                     else:
                         # update actor
                         with marked_timer("update_actor", timing_raw, color="red"):
-                            actor_output = self._update_actor(batch)
+                            if self.config.algorithm.get("hpf_rlvr", {}).get("enable", False):
+                                actor_output = self._update_actor_hpf_masked_grpo(batch)
+                            else:
+                                actor_output = self._update_actor(batch)
 
                         # Check if the ESI (Elastic Server Instance)/training plan is close to expiration.
                         esi_close_to_expiration = should_save_ckpt_esi(

@@ -109,6 +109,24 @@ algorithm:
     # Power used for weight scaling in "pow" method
     weight_pow: 2.0
 
+  # Progressive HAPPO-style prefix-follower RLVR settings.
+  hpf_rlvr:
+
+    # Whether to enable the experimental HPF masked-GRPO actor update path.
+    enable: False
+
+    # Progressive prefix block size B_prog.
+    progressive_block_size: 256
+
+    # Maximum generated response length L used by the progressive horizon.
+    max_response_length: ${data.max_response_length}
+
+    # Small constant for group-relative advantage normalization.
+    epsilon: 1e-6
+
+    # Whether to divide HPF group-relative advantages by group std.
+    std_normalize: True
+
 # config for the trainer
 trainer:
 
