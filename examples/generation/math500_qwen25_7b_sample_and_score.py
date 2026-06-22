@@ -24,6 +24,8 @@ import pandas as pd
 from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 
+from verl.utils.reward_score.prime_math import compute_score as compute_math_score
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
@@ -111,6 +113,36 @@ def generation_cumulative_logprob(output: Any) -> float | None:
         return None
 
 
+def verify_math_response(response: str, ground_truth: Any) -> dict[str, Any]:
+    try:
+        result = compute_math_score(response, str(ground_truth))
+    except Exception as exc:
+        return {
+            "is_correct": False,
+            "verifier_score": 0.0,
+            "format_correct": False,
+            "extracted_answer": None,
+            "verifier_error": repr(exc),
+        }
+
+    if isinstance(result, tuple):
+        is_correct = bool(result[0]) if len(result) > 0 else False
+        format_correct = bool(result[1]) if len(result) > 1 else None
+        extracted_answer = result[2] if len(result) > 2 else None
+    else:
+        is_correct = bool(result)
+        format_correct = None
+        extracted_answer = None
+
+    return {
+        "is_correct": is_correct,
+        "verifier_score": 1.0 if is_correct else 0.0,
+        "format_correct": format_correct,
+        "extracted_answer": extracted_answer,
+        "verifier_error": None,
+    }
+
+
 def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
     with path.open("w", encoding="utf-8") as f:
         for row in rows:
@@ -181,6 +213,7 @@ def main() -> None:
         reward_model = to_builtin(source_row.get("reward_model", {}))
         for sample_idx, completion in enumerate(request_output.outputs):
             response = completion.text
+            verification = verify_math_response(response, reward_model.get("ground_truth"))
             full_text = prompt_text + response
             full_ids = token_ids(tokenizer, full_text)
             response_ids = full_ids[len(prompt_ids) :]
@@ -197,6 +230,12 @@ def main() -> None:
                 "response": response,
                 "response_char_len": len(response),
                 "response_token_len": len(response_ids),
+                "is_correct": verification["is_correct"],
+                "verifier_score": verification["verifier_score"],
+                "format_correct": verification["format_correct"],
+                "extracted_answer": verification["extracted_answer"],
+                "verifier_name": "verl.utils.reward_score.prime_math.compute_score",
+                "verifier_error": verification["verifier_error"],
                 "sampling_temperature": args.temperature,
                 "sampling_top_p": args.top_p,
                 "generation_cumulative_logprob": generation_cumulative_logprob(completion),
@@ -258,6 +297,8 @@ def main() -> None:
         "jsonl": str(jsonl_path),
         "mean_response_token_len": float(out_df["response_token_len"].mean()),
         "mean_model_avg_log_likelihood": float(out_df["model_avg_log_likelihood"].mean()),
+        "accuracy": float(out_df["is_correct"].mean()),
+        "num_correct": int(out_df["is_correct"].sum()),
         "num_unscored": int(out_df["model_avg_log_likelihood"].isna().sum()),
     }
     summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
