@@ -126,6 +126,7 @@ ARGS=(
     --seed "${SEED:-42}"
     --score-batch-size "${SCORE_BATCH_SIZE:-64}"
     --num-shards "${NUM_SHARDS}"
+    --enforce-eager
 )
 if [ -n "${LIMIT:-}" ]; then
     ARGS+=(--limit "${LIMIT}")
@@ -137,9 +138,14 @@ for ((shard = 0; shard < NUM_SHARDS; shard++)); do
     last_gpu=$((first_gpu + GPUS_PER_SHARD - 1))
     visible_devices=$(seq -s, "${first_gpu}" "${last_gpu}")
     shard_output_dir="${OUTPUT_DIR}/shard_${shard}"
-    mkdir -p "${shard_output_dir}"
+    shard_cache_dir="${OUTPUT_DIR}/cache/shard_${shard}"
+    mkdir -p "${shard_output_dir}" "${shard_cache_dir}/vllm" "${shard_cache_dir}/torchinductor" "${shard_cache_dir}/triton"
     echo "Launching shard ${shard}/${NUM_SHARDS} on CUDA_VISIBLE_DEVICES=${visible_devices}"
     CUDA_VISIBLE_DEVICES="${visible_devices}" \
+        XDG_CACHE_HOME="${shard_cache_dir}" \
+        VLLM_CACHE_ROOT="${shard_cache_dir}/vllm" \
+        TORCHINDUCTOR_CACHE_DIR="${shard_cache_dir}/torchinductor" \
+        TRITON_CACHE_DIR="${shard_cache_dir}/triton" \
         python examples/generation/math500_qwen25_7b_sample_and_score.py \
             "${ARGS[@]}" \
             --shard-index "${shard}" \

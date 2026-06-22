@@ -44,6 +44,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=None, help="Optional row limit for debugging.")
     parser.add_argument("--num-shards", type=int, default=1, help="Split dataset into this many interleaved shards.")
     parser.add_argument("--shard-index", type=int, default=0, help="Current shard index in [0, num_shards).")
+    parser.add_argument("--enforce-eager", action=argparse.BooleanOptionalAction, default=True)
     return parser.parse_args()
 
 
@@ -160,12 +161,14 @@ def make_llm(args: argparse.Namespace) -> LLM:
         "dtype": args.dtype,
         "trust_remote_code": True,
         "seed": args.seed,
+        "enforce_eager": args.enforce_eager,
     }
-    try:
-        return LLM(**kwargs)
-    except TypeError:
-        kwargs.pop("seed", None)
-        return LLM(**kwargs)
+    for optional_key in ("seed", "enforce_eager"):
+        try:
+            return LLM(**kwargs)
+        except TypeError:
+            kwargs.pop(optional_key, None)
+    return LLM(**kwargs)
 
 
 def make_sampling_params(**kwargs: Any) -> SamplingParams:
@@ -302,6 +305,7 @@ def main() -> None:
         "max_tokens": args.max_tokens,
         "tensor_parallel_size": args.tensor_parallel_size,
         "gpu_memory_utilization": args.gpu_memory_utilization,
+        "enforce_eager": args.enforce_eager,
         "parquet": str(parquet_path),
         "jsonl": str(jsonl_path),
         "mean_response_token_len": float(out_df["response_token_len"].mean()),
