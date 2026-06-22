@@ -30,11 +30,9 @@ def parse_args() -> argparse.Namespace:
 
 
 def load_rows(input_dir: Path) -> pd.DataFrame:
-    paths = sorted(input_dir.glob("shard_*/math500_qwen25_7b_temp025_n16_loglik.parquet"))
+    paths = sorted(input_dir.glob("shard_*/*_loglik.parquet"))
     if not paths:
-        direct = input_dir / "math500_qwen25_7b_temp025_n16_loglik.parquet"
-        if direct.exists():
-            paths = [direct]
+        paths = sorted(input_dir.glob("*_loglik.parquet"))
     if not paths:
         raise FileNotFoundError(f"No result parquet found under {input_dir}")
     frames = []

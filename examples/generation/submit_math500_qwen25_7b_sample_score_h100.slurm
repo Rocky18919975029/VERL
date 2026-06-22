@@ -1,5 +1,5 @@
 #!/bin/bash
-# Generate 16 responses per Math-500 problem with Qwen2.5-7B at temp=0.25,
+# Generate responses per math problem with Qwen2.5-7B,
 # then compute response-length-normalized model log likelihoods.
 #
 # Submit from the repository root:
@@ -50,8 +50,10 @@ fi
 cd "${VERL_WORKDIR}"
 
 MODEL_PATH=${MODEL_PATH:-/data/user/zhongal/.cache/qwen2.5-7b-local}
-MATH500_FILE=${MATH500_FILE:-/data/user/zhongal/data/reschedule/math500.parquet}
-OUTPUT_DIR=${OUTPUT_DIR:-${VERL_WORKDIR}/outputs/math500_qwen25_7b_temp025_n16_${SLURM_JOB_ID}}
+DATASET_NAME=${DATASET_NAME:-math500}
+DATA_FILE=${DATA_FILE:-${MATH500_FILE:-/data/user/zhongal/data/reschedule/math500.parquet}}
+TEMP_TAG=$(echo "${TEMPERATURE:-0.25}" | tr . p)
+OUTPUT_DIR=${OUTPUT_DIR:-${VERL_WORKDIR}/outputs/${DATASET_NAME}_qwen25_7b_temp${TEMP_TAG}_n${N_RESPONSES:-16}_${SLURM_JOB_ID}}
 NUM_SHARDS=${NUM_SHARDS:-8}
 GPUS_PER_SHARD=${GPUS_PER_SHARD:-1}
 TENSOR_PARALLEL_SIZE=${TENSOR_PARALLEL_SIZE:-1}
@@ -71,8 +73,8 @@ if [ ! -d "${MODEL_PATH}" ]; then
     exit 1
 fi
 
-if [ ! -f "${MATH500_FILE}" ]; then
-    echo "Math-500 parquet not found: ${MATH500_FILE}" >&2
+if [ ! -f "${DATA_FILE}" ]; then
+    echo "Input parquet not found: ${DATA_FILE}" >&2
     exit 1
 fi
 
@@ -107,7 +109,8 @@ echo "Job ID: ${SLURM_JOB_ID}"
 echo "Node list: ${SLURM_JOB_NODELIST}"
 echo "Working directory: ${VERL_WORKDIR}"
 echo "Model: ${MODEL_PATH}"
-echo "Math-500 file: ${MATH500_FILE}"
+echo "Dataset: ${DATASET_NAME}"
+echo "Data file: ${DATA_FILE}"
 echo "Output dir: ${OUTPUT_DIR}"
 echo "Num shards: ${NUM_SHARDS}"
 echo "GPUs per shard: ${GPUS_PER_SHARD}"
@@ -115,7 +118,8 @@ echo "Tensor parallel size: ${TENSOR_PARALLEL_SIZE}"
 
 ARGS=(
     --model "${MODEL_PATH}"
-    --data "${MATH500_FILE}"
+    --data "${DATA_FILE}"
+    --dataset-name "${DATASET_NAME}"
     --temperature "${TEMPERATURE:-0.25}"
     --top-p "${TOP_P:-1.0}"
     --n "${N_RESPONSES:-16}"
@@ -128,6 +132,9 @@ ARGS=(
     --num-shards "${NUM_SHARDS}"
     --enforce-eager
 )
+if [ "${DEDUPLICATE_BY_RAW_PROBLEM:-0}" = "1" ]; then
+    ARGS+=(--deduplicate-by-raw-problem)
+fi
 if [ -n "${LIMIT:-}" ]; then
     ARGS+=(--limit "${LIMIT}")
 fi

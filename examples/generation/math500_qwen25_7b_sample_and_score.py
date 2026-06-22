@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Sample Math-500 responses and score response log likelihoods with vLLM.
+"""Sample math responses and score response log likelihoods with vLLM.
 
-For each Math-500 problem, this script samples N responses from a Qwen2.5-7B
+For each problem, this script samples N responses from a Qwen2.5-7B
 base model, then recomputes the model log likelihood of each sampled response
 conditioned on the prompt. The reported normalized score is:
 
@@ -30,7 +30,8 @@ from verl.utils.reward_score.prime_math import compute_score as compute_math_sco
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True, help="Local HF model path.")
-    parser.add_argument("--data", required=True, help="Math-500 parquet path.")
+    parser.add_argument("--data", required=True, help="Input parquet path.")
+    parser.add_argument("--dataset-name", default="math500", help="Short name used in output filenames.")
     parser.add_argument("--output-dir", required=True, help="Directory for outputs.")
     parser.add_argument("--temperature", type=float, default=0.25)
     parser.add_argument("--top-p", type=float, default=1.0)
@@ -45,6 +46,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-shards", type=int, default=1, help="Split dataset into this many interleaved shards.")
     parser.add_argument("--shard-index", type=int, default=0, help="Current shard index in [0, num_shards).")
     parser.add_argument("--enforce-eager", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--deduplicate-by-raw-problem", action="store_true")
     return parser.parse_args()
 
 
@@ -190,6 +192,13 @@ def main() -> None:
     df = pd.read_parquet(args.data).reset_index(names="original_problem_index")
     if args.limit is not None:
         df = df.head(args.limit)
+    if args.deduplicate_by_raw_problem:
+        raw_problem = df["extra_info"].apply(
+            lambda value: value.get("raw_problem") if isinstance(value, dict) else None
+        )
+        df = df.assign(_raw_problem_for_dedup=raw_problem).drop_duplicates("_raw_problem_for_dedup").drop(
+            columns=["_raw_problem_for_dedup"]
+        )
     if args.num_shards < 1:
         raise ValueError(f"--num-shards must be >= 1, got {args.num_shards}")
     if not 0 <= args.shard_index < args.num_shards:
@@ -285,9 +294,10 @@ def main() -> None:
                 total / len(token_logprobs) if total is not None and token_logprobs else None
             )
 
-    parquet_path = output_dir / "math500_qwen25_7b_temp025_n16_loglik.parquet"
-    jsonl_path = output_dir / "math500_qwen25_7b_temp025_n16_loglik.jsonl"
-    summary_path = output_dir / "math500_qwen25_7b_temp025_n16_summary.json"
+    prefix = f"{args.dataset_name}_qwen25_7b_temp{str(args.temperature).replace('.', 'p')}_n{args.n}"
+    parquet_path = output_dir / f"{prefix}_loglik.parquet"
+    jsonl_path = output_dir / f"{prefix}_loglik.jsonl"
+    summary_path = output_dir / f"{prefix}_summary.json"
 
     out_df = pd.DataFrame(rows)
     out_df.to_parquet(parquet_path, index=False)
@@ -296,6 +306,8 @@ def main() -> None:
     summary = {
         "model": args.model,
         "data": args.data,
+        "dataset_name": args.dataset_name,
+        "deduplicate_by_raw_problem": args.deduplicate_by_raw_problem,
         "num_problems": len(df),
         "num_shards": args.num_shards,
         "shard_index": args.shard_index,
