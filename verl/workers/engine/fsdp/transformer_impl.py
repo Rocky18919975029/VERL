@@ -18,6 +18,7 @@ The concrete Engine implementation using PyTorch FullyShardedDataParallel (FSDP)
 import gc
 import logging
 import os
+import time
 import warnings
 from contextlib import nullcontext
 from typing import Callable, ContextManager, Optional
@@ -638,7 +639,23 @@ class FSDPEngine(BaseEngine):
         # and _build_fsdp_module, so self.scaler may not be set.
         scaler = getattr(self, "scaler", None)
 
-        for micro_batch in micro_batches:
+        progress_label = tu.get_non_tensor_data(data, key="progress_label", default=None)
+        progress_log_interval = int(tu.get_non_tensor_data(data, key="progress_log_interval", default=0) or 0)
+        progress_mini_batch_index = tu.get_non_tensor_data(data, key="progress_mini_batch_index", default=None)
+        progress_total_mini_batches = tu.get_non_tensor_data(data, key="progress_total_mini_batches", default=None)
+        progress_enabled = bool(progress_label) and progress_log_interval > 0 and not forward_only
+        progress_rank0 = progress_enabled and self.get_data_parallel_rank() == 0
+        progress_start = time.perf_counter()
+        num_micro_batches = len(micro_batches)
+        if progress_rank0:
+            print(
+                "[HPF] actor micro-batch progress start "
+                f"label={progress_label} mini={progress_mini_batch_index}/{progress_total_mini_batches} "
+                f"micro_total={num_micro_batches}",
+                flush=True,
+            )
+
+        for micro_idx, micro_batch in enumerate(micro_batches):
             with ctx:
                 loss, meta_info = self.forward_step(micro_batch, loss_function=loss_function, forward_only=forward_only)
 
@@ -649,6 +666,20 @@ class FSDPEngine(BaseEngine):
                         loss.backward()
 
             output_lst.append(meta_info)
+            if progress_rank0 and (
+                micro_idx == 0
+                or (micro_idx + 1) % progress_log_interval == 0
+                or micro_idx + 1 == num_micro_batches
+            ):
+                elapsed = time.perf_counter() - progress_start
+                avg = elapsed / (micro_idx + 1)
+                print(
+                    "[HPF] actor micro-batch progress "
+                    f"label={progress_label} mini={progress_mini_batch_index}/{progress_total_mini_batches} "
+                    f"micro={micro_idx + 1}/{num_micro_batches} elapsed_s={elapsed:.2f} "
+                    f"avg_s_per_micro={avg:.2f}",
+                    flush=True,
+                )
 
         # postprocess and return
         return postprocess_batch_func(output_lst=output_lst, indices=indices, data=data)

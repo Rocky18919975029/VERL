@@ -14,6 +14,7 @@
 import functools
 import logging
 import os
+import time
 from contextlib import nullcontext
 from copy import deepcopy
 from functools import partial
@@ -248,6 +249,8 @@ class TrainingWorker(Worker, DistProfilerExtension):
         epochs = tu.pop(data, key="epochs", default=1)
         seed = tu.pop(data, key="seed", default=42)
         dataloader_kwargs = tu.pop(data, key="dataloader_kwargs", default={})
+        progress_label = tu.pop(data, key="progress_label", default=None)
+        progress_log_interval = int(tu.pop(data, key="progress_log_interval", default=0) or 0)
 
         assert mini_batch_size is not None or num_mini_batch is not None
 
@@ -276,8 +279,27 @@ class TrainingWorker(Worker, DistProfilerExtension):
             # update
             output_lst = []
             total_num_iterations = data.shape[0] // mini_batch_size_per_gpu * epochs
+            progress_enabled = bool(progress_label) and progress_log_interval > 0
+            progress_rank0 = progress_enabled and self.engine.get_data_parallel_rank() == 0
+            progress_start = time.perf_counter()
+            if progress_rank0:
+                print(
+                    "[HPF] actor mini-batch progress start "
+                    f"label={progress_label} total={total_num_iterations} "
+                    f"local_batch={data.shape[0]} mini_batch_per_gpu={mini_batch_size_per_gpu} epochs={epochs}",
+                    flush=True,
+                )
 
             for batch_idx, mini_batch_td in enumerate(dataloader):
+                mini_batch_start = time.perf_counter()
+                if progress_rank0:
+                    elapsed = mini_batch_start - progress_start
+                    print(
+                        "[HPF] actor mini-batch start "
+                        f"label={progress_label} mini={batch_idx + 1}/{total_num_iterations} "
+                        f"elapsed_s={elapsed:.2f}",
+                        flush=True,
+                    )
                 # add global token num
                 if "input_ids" in mini_batch_td:
                     global_token_num = mini_batch_td["input_ids"].offsets().diff().tolist()  # (total_nnz,)
@@ -298,8 +320,26 @@ class TrainingWorker(Worker, DistProfilerExtension):
                     update_lr_scheduler=batch_idx == total_num_iterations - 1,
                     disable_auto_offload=True,
                 )
+                if progress_enabled:
+                    tu.assign_non_tensor(
+                        mini_batch_td,
+                        progress_label=progress_label,
+                        progress_log_interval=progress_log_interval,
+                        progress_mini_batch_index=batch_idx + 1,
+                        progress_total_mini_batches=total_num_iterations,
+                    )
                 actor_output = self.train_batch(mini_batch_td)
                 output_lst.append(actor_output)
+                if progress_rank0:
+                    elapsed = time.perf_counter() - progress_start
+                    mini_elapsed = time.perf_counter() - mini_batch_start
+                    avg = elapsed / (batch_idx + 1)
+                    print(
+                        "[HPF] actor mini-batch done "
+                        f"label={progress_label} mini={batch_idx + 1}/{total_num_iterations} "
+                        f"mini_elapsed_s={mini_elapsed:.2f} elapsed_s={elapsed:.2f} avg_s_per_mini={avg:.2f}",
+                        flush=True,
+                    )
 
             if self.engine.is_mp_src_rank_with_outputs():
                 actor_output = [tu.get(output, "metrics") for output in output_lst]

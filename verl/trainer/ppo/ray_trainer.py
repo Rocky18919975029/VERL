@@ -1316,7 +1316,13 @@ class RayPPOTrainer:
         old_log_prob = DataProto.from_tensordict(old_log_prob)
         return old_log_prob, old_log_prob_mfu
 
-    def _update_actor(self, batch: DataProto) -> DataProto:
+    def _update_actor(
+        self,
+        batch: DataProto,
+        *,
+        progress_label: str | None = None,
+        progress_log_interval: int | None = None,
+    ) -> DataProto:
         rollout_config = self.config.actor_rollout_ref.rollout
         batch.meta_info["multi_turn"] = rollout_config.multi_turn.enable
         # TODO: Make "temperature" single source of truth from generation.
@@ -1338,8 +1344,7 @@ class RayPPOTrainer:
         ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs
         seed = self.config.actor_rollout_ref.actor.data_loader_seed
         shuffle = self.config.actor_rollout_ref.actor.shuffle
-        tu.assign_non_tensor(
-            batch_td,
+        actor_update_metadata = dict(
             calculate_entropy=calculate_entropy,
             distillation_use_topk=distillation_use_topk,
             global_batch_size=ppo_mini_batch_size,
@@ -1349,6 +1354,10 @@ class RayPPOTrainer:
             dataloader_kwargs={"shuffle": shuffle},
             compute_loss=True,
         )
+        if progress_label is not None:
+            actor_update_metadata["progress_label"] = progress_label
+            actor_update_metadata["progress_log_interval"] = 1 if progress_log_interval is None else int(progress_log_interval)
+        tu.assign_non_tensor(batch_td, **actor_update_metadata)
         actor_output = self.actor_rollout_wg.update_actor(batch_td)
         actor_output = tu.get(actor_output, "metrics")
         actor_output = rename_dict(actor_output, "actor/")
@@ -1364,6 +1373,7 @@ class RayPPOTrainer:
         progressive_block_size = int(hpf_config.get("progressive_block_size", 256))
         max_response_length = int(hpf_config.get("max_response_length", self.config.data.max_response_length))
         epsilon = float(hpf_config.get("epsilon", 1e-6))
+        progress_log_interval = int(hpf_config.get("progress_log_interval", 1))
         std_normalize = bool(
             hpf_config.get("std_normalize", self.config.algorithm.get("norm_adv_by_std_in_grpo", True))
         )
@@ -1391,7 +1401,11 @@ class RayPPOTrainer:
                 f"step={self.global_steps} batch={len(follower_update_batch)} pad={follower_pad_size}",
                 flush=True,
             )
-            follower_output = self._update_actor(follower_update_batch)
+            follower_output = self._update_actor(
+                follower_update_batch,
+                progress_label=f"hpf/follower/step-{self.global_steps}",
+                progress_log_interval=progress_log_interval,
+            )
             follower_elapsed = time.perf_counter() - follower_start
             print(
                 "[HPF] follower actor update done "
@@ -1408,7 +1422,11 @@ class RayPPOTrainer:
             f"step={self.global_steps} batch={len(leader_batch.batch)}",
             flush=True,
         )
-        leader_output = self._update_actor(leader_batch.batch)
+        leader_output = self._update_actor(
+            leader_batch.batch,
+            progress_label=f"hpf/leader/step-{self.global_steps}",
+            progress_log_interval=progress_log_interval,
+        )
         leader_elapsed = time.perf_counter() - leader_start
         print(
             "[HPF] leader actor update done "

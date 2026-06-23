@@ -127,6 +127,10 @@ algorithm:
     # Whether to divide HPF group-relative advantages by group std.
     std_normalize: True
 
+    # Print actor-update mini/micro-batch progress every N micro-batches.
+    # Set to 0 to disable. This is only used by the experimental HPF path.
+    progress_log_interval: 1
+
     # Two-stage prefix-follower rollout construction. Disabled by default so
     # existing GRPO and masked HPF smoke paths remain unchanged.
     tree_rollout:
