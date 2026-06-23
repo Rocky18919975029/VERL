@@ -53,13 +53,19 @@ class SingleTurnAgentLoop(AgentLoopBase):
             audios=audios,
             mm_processor_kwargs=mm_processor_kwargs,
         )
+        prefix_ids = kwargs.get("hpf_prefix_ids")
+        if prefix_ids is not None:
+            if hasattr(prefix_ids, "tolist"):
+                prefix_ids = prefix_ids.tolist()
+            prefix_ids = [int(token_id) for token_id in prefix_ids]
+        generation_prompt_ids = prompt_ids + (prefix_ids or [])
 
         # 3. generate sequences
         metrics = {}
         with simple_timer("generate_sequences", metrics):
             output: TokenOutput = await self.server_manager.generate(
                 request_id=uuid4().hex,
-                prompt_ids=prompt_ids,
+                prompt_ids=generation_prompt_ids,
                 sampling_params=sampling_params,
                 image_data=images,
                 video_data=videos,
@@ -68,13 +74,16 @@ class SingleTurnAgentLoop(AgentLoopBase):
             )
         if metrics.get("num_preempted") is None:
             metrics["num_preempted"] = output.num_preempted if output.num_preempted is not None else -1
-        response_mask = [1] * len(output.token_ids)
+        response_ids = (prefix_ids or []) + output.token_ids
+        response_mask = [1] * len(response_ids)
 
         output: AgentLoopOutput = AgentLoopOutput(
             prompt_ids=prompt_ids,
-            response_ids=output.token_ids[: self.response_length],
+            response_ids=response_ids[: self.response_length],
             response_mask=response_mask[: self.response_length],
-            response_logprobs=output.log_probs[: self.response_length] if output.log_probs else None,
+            response_logprobs=(
+                None if prefix_ids else (output.log_probs[: self.response_length] if output.log_probs else None)
+            ),
             routed_experts=(
                 output.routed_experts[: len(prompt_ids) + self.response_length]
                 if output.routed_experts is not None

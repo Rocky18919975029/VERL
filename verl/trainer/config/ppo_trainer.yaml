@@ -127,6 +127,27 @@ algorithm:
     # Whether to divide HPF group-relative advantages by group std.
     std_normalize: True
 
+    # Two-stage prefix-follower rollout construction. Disabled by default so
+    # existing GRPO and masked HPF smoke paths remain unchanged.
+    tree_rollout:
+
+      # Whether to sample N prefixes and M suffixes instead of full responses.
+      enable: False
+
+      # Number of high-temperature prefixes per prompt.
+      num_prefixes: 4
+
+      # Number of low-temperature suffixes per prefix.
+      num_suffixes: 2
+
+      # Prefix rollout sampling parameters.
+      prefix_temperature: 1.0
+      prefix_top_p: 1.0
+
+      # Suffix rollout sampling parameters.
+      suffix_temperature: 0.25
+      suffix_top_p: 1.0
+
 # config for the trainer
 trainer:
 

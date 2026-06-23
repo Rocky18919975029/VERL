@@ -14,13 +14,38 @@ HPF_PROGRESSIVE_BLOCK_SIZE=${HPF_PROGRESSIVE_BLOCK_SIZE:-256}
 HPF_MAX_RESPONSE_LENGTH=${HPF_MAX_RESPONSE_LENGTH:-${MAX_RESPONSE_LENGTH:-3072}}
 HPF_EPSILON=${HPF_EPSILON:-1e-6}
 HPF_STD_NORMALIZE=${HPF_STD_NORMALIZE:-True}
+HPF_TREE_ROLLOUT=${HPF_TREE_ROLLOUT:-False}
+HPF_TREE_NUM_PREFIXES=${HPF_TREE_NUM_PREFIXES:-4}
+HPF_TREE_NUM_SUFFIXES=${HPF_TREE_NUM_SUFFIXES:-2}
+HPF_TREE_PREFIX_TEMPERATURE=${HPF_TREE_PREFIX_TEMPERATURE:-1.0}
+HPF_TREE_PREFIX_TOP_P=${HPF_TREE_PREFIX_TOP_P:-1.0}
+HPF_TREE_SUFFIX_TEMPERATURE=${HPF_TREE_SUFFIX_TEMPERATURE:-0.25}
+HPF_TREE_SUFFIX_TOP_P=${HPF_TREE_SUFFIX_TOP_P:-1.0}
+
+HPF_ARGS=(
+    algorithm.hpf_rlvr.enable=True
+    algorithm.hpf_rlvr.progressive_block_size="${HPF_PROGRESSIVE_BLOCK_SIZE}"
+    algorithm.hpf_rlvr.max_response_length="${HPF_MAX_RESPONSE_LENGTH}"
+    algorithm.hpf_rlvr.epsilon="${HPF_EPSILON}"
+    algorithm.hpf_rlvr.std_normalize="${HPF_STD_NORMALIZE}"
+)
+
+if [ "${HPF_TREE_ROLLOUT}" = "True" ] || [ "${HPF_TREE_ROLLOUT}" = "true" ] || [ "${HPF_TREE_ROLLOUT}" = "1" ]; then
+    ROLLOUT_N=${ROLLOUT_N:-$((HPF_TREE_NUM_PREFIXES * HPF_TREE_NUM_SUFFIXES))}
+    export ROLLOUT_N
+    HPF_ARGS+=(
+        algorithm.hpf_rlvr.tree_rollout.enable=True
+        algorithm.hpf_rlvr.tree_rollout.num_prefixes="${HPF_TREE_NUM_PREFIXES}"
+        algorithm.hpf_rlvr.tree_rollout.num_suffixes="${HPF_TREE_NUM_SUFFIXES}"
+        algorithm.hpf_rlvr.tree_rollout.prefix_temperature="${HPF_TREE_PREFIX_TEMPERATURE}"
+        algorithm.hpf_rlvr.tree_rollout.prefix_top_p="${HPF_TREE_PREFIX_TOP_P}"
+        algorithm.hpf_rlvr.tree_rollout.suffix_temperature="${HPF_TREE_SUFFIX_TEMPERATURE}"
+        algorithm.hpf_rlvr.tree_rollout.suffix_top_p="${HPF_TREE_SUFFIX_TOP_P}"
+    )
+fi
 
 PROJECT_NAME="${PROJECT_NAME}" \
 RUN_NAME="${RUN_NAME}" \
 bash examples/grpo_trainer/run_qwen2_5_math_7b_grpo_reschedule_baseline.sh \
-    algorithm.hpf_rlvr.enable=True \
-    algorithm.hpf_rlvr.progressive_block_size="${HPF_PROGRESSIVE_BLOCK_SIZE}" \
-    algorithm.hpf_rlvr.max_response_length="${HPF_MAX_RESPONSE_LENGTH}" \
-    algorithm.hpf_rlvr.epsilon="${HPF_EPSILON}" \
-    algorithm.hpf_rlvr.std_normalize="${HPF_STD_NORMALIZE}" \
+    "${HPF_ARGS[@]}" \
     "$@"

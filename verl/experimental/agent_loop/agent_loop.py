@@ -501,6 +501,9 @@ class AgentLoopWorker:
             repetition_penalty=1.0,
             logprobs=config.calculate_log_probs,
         )
+        for key in ("temperature", "top_p", "top_k", "max_tokens", "max_new_tokens"):
+            if key in batch.meta_info:
+                sampling_params[key] = batch.meta_info[key]
 
         def apply_greedy_sampling_params(params: dict[str, Any]) -> None:
             params["top_p"] = 1.0
@@ -543,16 +546,31 @@ class AgentLoopWorker:
             batch.meta_info.get("global_steps", -1), index.tolist(), batch.meta_info.get("validate", False)
         )
 
-        # NOTE: __do_sample__ is an internal per-sample override used by REMAX combined rollout.
-        # Do not forward it to concrete agent loops, which may reject unknown kwargs.
+        # NOTE: double-underscore keys are internal per-sample rollout controls.
+        # Do not forward them to concrete agent loops, which may reject unknown kwargs.
         per_sample_do_sample = batch.non_tensor_batch.get("__do_sample__")
+        per_sample_sampling_overrides = {
+            "__temperature__": "temperature",
+            "__top_p__": "top_p",
+            "__top_k__": "top_k",
+            "__max_tokens__": "max_tokens",
+            "__max_new_tokens__": "max_new_tokens",
+        }
         tasks = []
         for i in range(len(batch)):
             trace_this_sample = i in traced_indices
-            kwargs = {k: v[i] for k, v in batch.non_tensor_batch.items() if k != "__do_sample__"}
+            kwargs = {
+                k: v[i]
+                for k, v in batch.non_tensor_batch.items()
+                if k != "__do_sample__" and k not in per_sample_sampling_overrides
+            }
             sample_sampling_params = dict(sampling_params)
             if not validate and per_sample_do_sample is not None and not bool(per_sample_do_sample[i]):
                 apply_greedy_sampling_params(sample_sampling_params)
+            for source_key, target_key in per_sample_sampling_overrides.items():
+                values = batch.non_tensor_batch.get(source_key)
+                if values is not None:
+                    sample_sampling_params[target_key] = values[i].item() if hasattr(values[i], "item") else values[i]
             tasks.append(
                 asyncio.create_task(
                     self._run_agent_loop(sample_sampling_params, trajectory_info[i], trace=trace_this_sample, **kwargs)

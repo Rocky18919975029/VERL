@@ -1392,6 +1392,173 @@ class RayPPOTrainer:
         metrics.update(rename_dict(leader_metrics, "hpf/leader/"))
         return DataProto.from_single_dict(data={}, meta_info={"metrics": metrics})
 
+    @staticmethod
+    def _object_array(values: list[Any]) -> np.ndarray:
+        array = np.empty(len(values), dtype=object)
+        array[:] = values
+        return array
+
+    def _hpf_tree_rollout_enabled(self) -> bool:
+        hpf_config = self.config.algorithm.get("hpf_rlvr", {})
+        tree_config = hpf_config.get("tree_rollout", {})
+        return bool(hpf_config.get("enable", False)) and bool(tree_config.get("enable", False))
+
+    def _extract_response_token_ids(self, rollout_output: DataProto) -> list[list[int]]:
+        responses = rollout_output.batch["responses"].detach().cpu()
+        response_mask = rollout_output.batch["response_mask"].detach().cpu().bool()
+        token_ids = []
+        for response, mask in zip(responses, response_mask, strict=True):
+            token_ids.append(response[mask].tolist())
+        return token_ids
+
+    def _add_hpf_tree_metadata(
+        self,
+        output: DataProto,
+        *,
+        problem_uids: np.ndarray,
+        prefix_indices: np.ndarray,
+        suffix_indices: np.ndarray,
+        prefix_token_ids: list[list[int]],
+    ) -> None:
+        prefix_uids = [
+            f"{problem_uid}::prefix-{int(prefix_index)}"
+            for problem_uid, prefix_index in zip(problem_uids, prefix_indices, strict=True)
+        ]
+        output.non_tensor_batch["hpf_problem_uid"] = np.asarray(problem_uids, dtype=object)
+        output.non_tensor_batch["hpf_prefix_index"] = np.asarray(prefix_indices, dtype=np.int32)
+        output.non_tensor_batch["hpf_suffix_index"] = np.asarray(suffix_indices, dtype=np.int32)
+        output.non_tensor_batch["hpf_prefix_uid"] = np.asarray(prefix_uids, dtype=object)
+        output.non_tensor_batch["hpf_prefix_ids"] = self._object_array(prefix_token_ids)
+
+    def _generate_hpf_tree_sequences(self, gen_batch: DataProto) -> tuple[DataProto, dict[str, float]]:
+        if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
+            raise ValueError("HPF tree rollout does not support REMAX baseline generation.")
+        if self.config.actor_rollout_ref.actor.get("use_rollout_log_probs", False):
+            raise ValueError("HPF tree rollout requires recomputing old_log_probs; disable actor.use_rollout_log_probs.")
+
+        hpf_config = self.config.algorithm.get("hpf_rlvr", {})
+        tree_config = hpf_config.get("tree_rollout", {})
+        num_prefixes = int(tree_config.get("num_prefixes", 4))
+        num_suffixes = int(tree_config.get("num_suffixes", 2))
+        expected_rollout_n = num_prefixes * num_suffixes
+        rollout_n = int(self.config.actor_rollout_ref.rollout.n)
+        if rollout_n != expected_rollout_n:
+            raise ValueError(
+                "HPF tree rollout requires actor_rollout_ref.rollout.n to equal "
+                f"num_prefixes*num_suffixes ({expected_rollout_n}), got {rollout_n}."
+            )
+
+        max_response_length = int(hpf_config.get("max_response_length", self.config.data.max_response_length))
+        progressive_block_size = int(hpf_config.get("progressive_block_size", 256))
+        horizon = min(int(self.global_steps) * progressive_block_size, max_response_length)
+
+        prefix_batch = gen_batch.repeat(repeat_times=num_prefixes, interleave=True)
+        prefix_batch.meta_info["temperature"] = float(tree_config.get("prefix_temperature", 1.0))
+        prefix_batch.meta_info["top_p"] = float(tree_config.get("prefix_top_p", 1.0))
+        prefix_batch.meta_info["max_tokens"] = horizon
+        prefix_output = self.async_rollout_manager.generate_sequences(prefix_batch)
+        prefix_timing = prefix_output.meta_info.get("timing", {})
+        prefix_output.meta_info.pop("timing", None)
+
+        prefix_token_ids = self._extract_response_token_ids(prefix_output)
+        prefix_lengths = np.array([len(token_ids) for token_ids in prefix_token_ids], dtype=np.int32)
+        needs_suffix = (prefix_lengths >= horizon) & (prefix_lengths < max_response_length)
+        prefix_indices = np.tile(np.arange(num_prefixes, dtype=np.int32), len(gen_batch))
+        problem_uids = np.asarray(prefix_batch.non_tensor_batch["uid"], dtype=object)
+        self._add_hpf_tree_metadata(
+            prefix_output,
+            problem_uids=problem_uids,
+            prefix_indices=prefix_indices,
+            suffix_indices=np.full(len(prefix_output), -1, dtype=np.int32),
+            prefix_token_ids=prefix_token_ids,
+        )
+
+        suffix_output = None
+        suffix_timing = {}
+        suffix_cursor = 0
+        if bool(needs_suffix.any()):
+            suffix_source = prefix_batch[needs_suffix]
+            suffix_source = suffix_source.repeat(repeat_times=num_suffixes, interleave=True)
+            source_indices = np.nonzero(needs_suffix)[0]
+            repeated_source_indices = np.repeat(source_indices, num_suffixes)
+            suffix_prefix_ids = [prefix_token_ids[index] for index in repeated_source_indices]
+            suffix_source.non_tensor_batch["hpf_prefix_ids"] = self._object_array(suffix_prefix_ids)
+            suffix_source.non_tensor_batch["hpf_problem_uid"] = problem_uids[repeated_source_indices]
+            suffix_source.non_tensor_batch["hpf_prefix_index"] = prefix_indices[repeated_source_indices]
+            suffix_source.non_tensor_batch["hpf_suffix_index"] = np.tile(
+                np.arange(num_suffixes, dtype=np.int32), len(source_indices)
+            )
+            suffix_source.non_tensor_batch["hpf_prefix_uid"] = np.asarray(
+                [
+                    f"{problem_uids[index]}::prefix-{int(prefix_indices[index])}"
+                    for index in repeated_source_indices
+                ],
+                dtype=object,
+            )
+            suffix_budgets = np.maximum(max_response_length - prefix_lengths[repeated_source_indices], 1)
+            suffix_source.non_tensor_batch["__max_tokens__"] = suffix_budgets.astype(np.int32)
+            suffix_source.meta_info["temperature"] = float(tree_config.get("suffix_temperature", 0.25))
+            suffix_source.meta_info["top_p"] = float(tree_config.get("suffix_top_p", 1.0))
+            suffix_output = self.async_rollout_manager.generate_sequences(suffix_source)
+            suffix_timing = suffix_output.meta_info.get("timing", {})
+            suffix_output.meta_info.pop("timing", None)
+            internal_sampling_keys = [
+                key
+                for key in ("__temperature__", "__top_p__", "__top_k__", "__max_tokens__", "__max_new_tokens__")
+                if key in suffix_output.non_tensor_batch
+            ]
+            if internal_sampling_keys:
+                suffix_output.pop(non_tensor_batch_keys=internal_sampling_keys)
+
+        ordered_outputs = []
+        ordered_problem_uids = []
+        ordered_prefix_indices = []
+        ordered_suffix_indices = []
+        ordered_prefix_token_ids = []
+        for prefix_row in range(len(prefix_output)):
+            if needs_suffix[prefix_row]:
+                for suffix_idx in range(num_suffixes):
+                    ordered_outputs.append(suffix_output[suffix_cursor + suffix_idx : suffix_cursor + suffix_idx + 1])
+                    ordered_problem_uids.append(problem_uids[prefix_row])
+                    ordered_prefix_indices.append(prefix_indices[prefix_row])
+                    ordered_suffix_indices.append(suffix_idx)
+                    ordered_prefix_token_ids.append(prefix_token_ids[prefix_row])
+                suffix_cursor += num_suffixes
+            else:
+                repeated_prefix_output = prefix_output[prefix_row : prefix_row + 1].repeat(
+                    repeat_times=num_suffixes, interleave=True
+                )
+                for suffix_idx in range(num_suffixes):
+                    ordered_outputs.append(repeated_prefix_output[suffix_idx : suffix_idx + 1])
+                    ordered_problem_uids.append(problem_uids[prefix_row])
+                    ordered_prefix_indices.append(prefix_indices[prefix_row])
+                    ordered_suffix_indices.append(suffix_idx)
+                    ordered_prefix_token_ids.append(prefix_token_ids[prefix_row])
+
+        tree_output = DataProto.concat(ordered_outputs)
+        self._add_hpf_tree_metadata(
+            tree_output,
+            problem_uids=np.asarray(ordered_problem_uids, dtype=object),
+            prefix_indices=np.asarray(ordered_prefix_indices, dtype=np.int32),
+            suffix_indices=np.asarray(ordered_suffix_indices, dtype=np.int32),
+            prefix_token_ids=ordered_prefix_token_ids,
+        )
+        tree_metrics = {
+            "hpf/tree_rollout_enabled": 1.0,
+            "hpf/tree_num_prefixes": float(num_prefixes),
+            "hpf/tree_num_suffixes": float(num_suffixes),
+            "hpf/tree_horizon_tokens": float(horizon),
+            "hpf/tree_prefix_tokens_mean": float(prefix_lengths.mean()) if len(prefix_lengths) else 0.0,
+            "hpf/tree_prefix_stopped_frac": float((~needs_suffix).mean()) if len(needs_suffix) else 0.0,
+        }
+        tree_timing = {}
+        for key, value in prefix_timing.items():
+            tree_timing[f"hpf_tree/prefix/{key}"] = value
+        for key, value in suffix_timing.items():
+            tree_timing[f"hpf_tree/suffix/{key}"] = value
+        tree_output.meta_info["timing"] = tree_timing
+        return tree_output, tree_metrics
+
     def _update_critic(self, batch: DataProto) -> DataProto:
         batch_td = batch.to_tensordict()
         # step 2: convert from padding to no-padding
@@ -1506,9 +1673,13 @@ class RayPPOTrainer:
                 # pass global_steps to trace
                 gen_batch.meta_info["global_steps"] = self.global_steps
                 rollout_n = self.config.actor_rollout_ref.rollout.n
+                use_hpf_tree_rollout = self._hpf_tree_rollout_enabled()
                 gen_batch_output = gen_batch.repeat(repeat_times=rollout_n, interleave=True)
 
-                if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
+                if use_hpf_tree_rollout:
+                    combined_gen_batch = None
+                    num_sampled_prompts = None
+                elif self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                     # NOTE: REMAX needs one sampled rollout plus one greedy baseline per prompt.
                     # Keep them in a single agent-loop/vLLM request to avoid sending a second
                     # rollout after replicas have been put to sleep, which can leave async vLLM
@@ -1528,17 +1699,25 @@ class RayPPOTrainer:
                     with marked_timer("gen", timing_raw, color="red"):
                         if curr_step_profile:
                             self.llm_server_manager.start_profile()
-                        combined_gen_output = self.async_rollout_manager.generate_sequences(combined_gen_batch)
+                        if use_hpf_tree_rollout:
+                            gen_batch_output, hpf_tree_metrics = self._generate_hpf_tree_sequences(gen_batch)
+                            metrics.update(hpf_tree_metrics)
+                            timing_raw.update(gen_batch_output.meta_info["timing"])
+                            gen_batch_output.meta_info.pop("timing", None)
+                        else:
+                            combined_gen_output = self.async_rollout_manager.generate_sequences(combined_gen_batch)
                         self.checkpoint_manager.sleep_replicas()
                         if curr_step_profile:
                             self.llm_server_manager.stop_profile()
 
-                        timing_raw.update(combined_gen_output.meta_info["timing"])
-                        combined_gen_output.meta_info.pop("timing", None)
+                        if not use_hpf_tree_rollout:
+                            timing_raw.update(combined_gen_output.meta_info["timing"])
+                            combined_gen_output.meta_info.pop("timing", None)
 
-                    gen_batch_output = combined_gen_output.slice(0, num_sampled_prompts)
-                    if "__do_sample__" in gen_batch_output.non_tensor_batch:
-                        gen_batch_output.pop(non_tensor_batch_keys=["__do_sample__"])
+                    if not use_hpf_tree_rollout:
+                        gen_batch_output = combined_gen_output.slice(0, num_sampled_prompts)
+                        if "__do_sample__" in gen_batch_output.non_tensor_batch:
+                            gen_batch_output.pop(non_tensor_batch_keys=["__do_sample__"])
 
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         gen_baseline_output = combined_gen_output.slice(num_sampled_prompts, None)
@@ -1553,7 +1732,10 @@ class RayPPOTrainer:
                         batch.batch["reward_baselines"] = reward_baseline_tensor
 
                         del gen_baseline_output
-                    del combined_gen_batch, combined_gen_output
+                    if use_hpf_tree_rollout:
+                        del combined_gen_batch
+                    else:
+                        del combined_gen_batch, combined_gen_output
                     # repeat to align with repeated responses in rollout
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     batch = batch.union(gen_batch_output)

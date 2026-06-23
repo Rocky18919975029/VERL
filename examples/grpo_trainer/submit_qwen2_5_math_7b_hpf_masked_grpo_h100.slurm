@@ -133,6 +133,9 @@ echo "Model: ${MODEL_PATH}"
 echo "Data dir: ${DATA_DIR}"
 echo "Total training steps: ${TOTAL_TRAINING_STEPS:-2}"
 echo "HPF progressive block size: ${HPF_PROGRESSIVE_BLOCK_SIZE:-256}"
+echo "HPF tree rollout: ${HPF_TREE_ROLLOUT:-False}"
+echo "HPF tree num prefixes: ${HPF_TREE_NUM_PREFIXES:-4}"
+echo "HPF tree num suffixes: ${HPF_TREE_NUM_SUFFIXES:-2}"
 
 ACTOR_PARAM_OFFLOAD=${ACTOR_PARAM_OFFLOAD:-True}
 ACTOR_OPTIMIZER_OFFLOAD=${ACTOR_OPTIMIZER_OFFLOAD:-True}
