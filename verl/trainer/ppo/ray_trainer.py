@@ -1456,7 +1456,10 @@ class RayPPOTrainer:
         prefix_batch.meta_info["temperature"] = float(tree_config.get("prefix_temperature", 1.0))
         prefix_batch.meta_info["top_p"] = float(tree_config.get("prefix_top_p", 1.0))
         prefix_batch.meta_info["max_tokens"] = horizon
-        prefix_output = self.async_rollout_manager.generate_sequences(prefix_batch)
+        rollout_worker_divisor = int(self.config.actor_rollout_ref.rollout.agent.num_workers)
+        prefix_batch_padded, prefix_pad_size = pad_dataproto_to_divisor(prefix_batch, rollout_worker_divisor)
+        prefix_output = self.async_rollout_manager.generate_sequences(prefix_batch_padded)
+        prefix_output = unpad_dataproto(prefix_output, prefix_pad_size)
         prefix_timing = prefix_output.meta_info.get("timing", {})
         prefix_output.meta_info.pop("timing", None)
 
@@ -1499,7 +1502,9 @@ class RayPPOTrainer:
             suffix_source.non_tensor_batch["__max_tokens__"] = suffix_budgets.astype(np.int32)
             suffix_source.meta_info["temperature"] = float(tree_config.get("suffix_temperature", 0.25))
             suffix_source.meta_info["top_p"] = float(tree_config.get("suffix_top_p", 1.0))
-            suffix_output = self.async_rollout_manager.generate_sequences(suffix_source)
+            suffix_source_padded, suffix_pad_size = pad_dataproto_to_divisor(suffix_source, rollout_worker_divisor)
+            suffix_output = self.async_rollout_manager.generate_sequences(suffix_source_padded)
+            suffix_output = unpad_dataproto(suffix_output, suffix_pad_size)
             suffix_timing = suffix_output.meta_info.get("timing", {})
             suffix_output.meta_info.pop("timing", None)
             internal_sampling_keys = [
@@ -1550,6 +1555,8 @@ class RayPPOTrainer:
             "hpf/tree_horizon_tokens": float(horizon),
             "hpf/tree_prefix_tokens_mean": float(prefix_lengths.mean()) if len(prefix_lengths) else 0.0,
             "hpf/tree_prefix_stopped_frac": float((~needs_suffix).mean()) if len(needs_suffix) else 0.0,
+            "hpf/tree_prefix_pad_size": float(prefix_pad_size),
+            "hpf/tree_suffix_pad_size": float(suffix_pad_size) if suffix_output is not None else 0.0,
         }
         tree_timing = {}
         for key, value in prefix_timing.items():
