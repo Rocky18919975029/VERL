@@ -20,6 +20,7 @@ This trainer supports model-agonistic model initialization with huggingface
 
 import json
 import os
+import time
 import uuid
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -1358,6 +1359,7 @@ class RayPPOTrainer:
         return actor_output
 
     def _update_actor_hpf_masked_grpo(self, batch: DataProto) -> DataProto:
+        hpf_update_start = time.perf_counter()
         hpf_config = self.config.algorithm.get("hpf_rlvr", {})
         progressive_block_size = int(hpf_config.get("progressive_block_size", 256))
         max_response_length = int(hpf_config.get("max_response_length", self.config.data.max_response_length))
@@ -1383,11 +1385,38 @@ class RayPPOTrainer:
                 follower_update_batch, follower_mini_batch_size
             )
             metrics["hpf/follower_pad_size"] = float(follower_pad_size)
+            follower_start = time.perf_counter()
+            print(
+                "[HPF] follower actor update start "
+                f"step={self.global_steps} batch={len(follower_update_batch)} pad={follower_pad_size}",
+                flush=True,
+            )
             follower_output = self._update_actor(follower_update_batch)
+            follower_elapsed = time.perf_counter() - follower_start
+            print(
+                "[HPF] follower actor update done "
+                f"step={self.global_steps} elapsed_s={follower_elapsed:.2f}",
+                flush=True,
+            )
+            metrics["timing_s/hpf/follower_update_actor"] = float(follower_elapsed)
             follower_metrics = reduce_metrics(follower_output.meta_info["metrics"])
             metrics.update(rename_dict(follower_metrics, "hpf/follower/"))
             metrics.update(follower_batch.metrics)
+        leader_start = time.perf_counter()
+        print(
+            "[HPF] leader actor update start "
+            f"step={self.global_steps} batch={len(leader_batch.batch)}",
+            flush=True,
+        )
         leader_output = self._update_actor(leader_batch.batch)
+        leader_elapsed = time.perf_counter() - leader_start
+        print(
+            "[HPF] leader actor update done "
+            f"step={self.global_steps} elapsed_s={leader_elapsed:.2f}",
+            flush=True,
+        )
+        metrics["timing_s/hpf/leader_update_actor"] = float(leader_elapsed)
+        metrics["timing_s/hpf/update_actor_total"] = float(time.perf_counter() - hpf_update_start)
         leader_metrics = reduce_metrics(leader_output.meta_info["metrics"])
         metrics.update(rename_dict(leader_metrics, "hpf/leader/"))
         return DataProto.from_single_dict(data={}, meta_info={"metrics": metrics})
@@ -1440,6 +1469,7 @@ class RayPPOTrainer:
             output.pop(batch_keys=drop_keys)
 
     def _generate_hpf_tree_sequences(self, gen_batch: DataProto) -> tuple[DataProto, dict[str, float]]:
+        tree_start = time.perf_counter()
         if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
             raise ValueError("HPF tree rollout does not support REMAX baseline generation.")
         if self.config.actor_rollout_ref.actor.get("use_rollout_log_probs", False):
@@ -1460,6 +1490,12 @@ class RayPPOTrainer:
         max_response_length = int(hpf_config.get("max_response_length", self.config.data.max_response_length))
         progressive_block_size = int(hpf_config.get("progressive_block_size", 256))
         horizon = min(int(self.global_steps) * progressive_block_size, max_response_length)
+        print(
+            "[HPF] tree rollout start "
+            f"step={self.global_steps} prompts={len(gen_batch)} prefixes={num_prefixes} "
+            f"suffixes={num_suffixes} horizon={horizon} max_response={max_response_length}",
+            flush=True,
+        )
 
         prefix_batch = gen_batch.repeat(repeat_times=num_prefixes, interleave=True)
         prefix_batch.meta_info["temperature"] = float(tree_config.get("prefix_temperature", 1.0))
@@ -1468,8 +1504,20 @@ class RayPPOTrainer:
         prefix_batch.meta_info["logprobs"] = False
         rollout_worker_divisor = int(self.config.actor_rollout_ref.rollout.agent.num_workers)
         prefix_batch_padded, prefix_pad_size = pad_dataproto_to_divisor(prefix_batch, rollout_worker_divisor)
+        prefix_start = time.perf_counter()
+        print(
+            "[HPF] prefix rollout start "
+            f"step={self.global_steps} requests={len(prefix_batch)} pad={prefix_pad_size}",
+            flush=True,
+        )
         prefix_output = self.async_rollout_manager.generate_sequences(prefix_batch_padded)
         prefix_output = unpad_dataproto(prefix_output, prefix_pad_size)
+        prefix_elapsed = time.perf_counter() - prefix_start
+        print(
+            "[HPF] prefix rollout done "
+            f"step={self.global_steps} outputs={len(prefix_output)} elapsed_s={prefix_elapsed:.2f}",
+            flush=True,
+        )
         prefix_timing = prefix_output.meta_info.get("timing", {})
         prefix_output.meta_info.pop("timing", None)
         self._drop_hpf_tree_unused_batch_keys(prefix_output)
@@ -1483,6 +1531,7 @@ class RayPPOTrainer:
         suffix_output = None
         suffix_timing = {}
         suffix_cursor = 0
+        suffix_elapsed = 0.0
         if bool(needs_suffix.any()):
             suffix_source = prefix_batch[needs_suffix]
             suffix_source = suffix_source.repeat(repeat_times=num_suffixes, interleave=True)
@@ -1496,8 +1545,22 @@ class RayPPOTrainer:
             suffix_source.meta_info["top_p"] = float(tree_config.get("suffix_top_p", 1.0))
             suffix_source.meta_info["logprobs"] = False
             suffix_source_padded, suffix_pad_size = pad_dataproto_to_divisor(suffix_source, rollout_worker_divisor)
+            suffix_start = time.perf_counter()
+            print(
+                "[HPF] suffix rollout start "
+                f"step={self.global_steps} prefixes_needing_suffix={len(source_indices)} "
+                f"requests={len(suffix_source)} pad={suffix_pad_size} "
+                f"budget_mean={float(suffix_budgets.mean()):.1f} budget_max={int(suffix_budgets.max())}",
+                flush=True,
+            )
             suffix_output = self.async_rollout_manager.generate_sequences(suffix_source_padded)
             suffix_output = unpad_dataproto(suffix_output, suffix_pad_size)
+            suffix_elapsed = time.perf_counter() - suffix_start
+            print(
+                "[HPF] suffix rollout done "
+                f"step={self.global_steps} outputs={len(suffix_output)} elapsed_s={suffix_elapsed:.2f}",
+                flush=True,
+            )
             suffix_timing = suffix_output.meta_info.get("timing", {})
             suffix_output.meta_info.pop("timing", None)
             self._drop_hpf_tree_unused_batch_keys(suffix_output)
@@ -1516,6 +1579,13 @@ class RayPPOTrainer:
             ]
             if internal_sampling_keys:
                 suffix_output.pop(non_tensor_batch_keys=internal_sampling_keys)
+        else:
+            suffix_pad_size = 0
+            print(
+                "[HPF] suffix rollout skipped "
+                f"step={self.global_steps} prefixes_needing_suffix=0",
+                flush=True,
+            )
 
         ordered_outputs = []
         ordered_problem_uids = []
@@ -1559,7 +1629,16 @@ class RayPPOTrainer:
             "hpf/tree_prefix_stopped_frac": float((~needs_suffix).mean()) if len(needs_suffix) else 0.0,
             "hpf/tree_prefix_pad_size": float(prefix_pad_size),
             "hpf/tree_suffix_pad_size": float(suffix_pad_size) if suffix_output is not None else 0.0,
+            "timing_s/hpf/tree_rollout_total_wall": float(time.perf_counter() - tree_start),
+            "timing_s/hpf/prefix_rollout_wall": float(prefix_elapsed),
+            "timing_s/hpf/suffix_rollout_wall": float(suffix_elapsed),
         }
+        print(
+            "[HPF] tree rollout done "
+            f"step={self.global_steps} trajectories={len(tree_output)} "
+            f"elapsed_s={tree_metrics['timing_s/hpf/tree_rollout_total_wall']:.2f}",
+            flush=True,
+        )
         tree_timing = {}
         for key, value in prefix_timing.items():
             tree_timing[f"hpf_tree/prefix/{key}"] = value
