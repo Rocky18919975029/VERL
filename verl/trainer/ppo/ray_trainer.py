@@ -1430,6 +1430,15 @@ class RayPPOTrainer:
         output.non_tensor_batch["hpf_prefix_uid"] = np.asarray(prefix_uids, dtype=object)
         output.non_tensor_batch["hpf_prefix_ids"] = self._object_array(prefix_token_ids)
 
+    @staticmethod
+    def _drop_hpf_tree_unused_batch_keys(output: DataProto) -> None:
+        # Tree suffix requests use prefix prefill, so rollout logprobs are not a
+        # complete logprob record for the final prompt+response trajectory.
+        # Old logprobs are recomputed after reward, as in the normal GRPO path.
+        drop_keys = [key for key in ("rollout_log_probs",) if key in output.batch]
+        if drop_keys:
+            output.pop(batch_keys=drop_keys)
+
     def _generate_hpf_tree_sequences(self, gen_batch: DataProto) -> tuple[DataProto, dict[str, float]]:
         if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
             raise ValueError("HPF tree rollout does not support REMAX baseline generation.")
@@ -1462,6 +1471,7 @@ class RayPPOTrainer:
         prefix_output = unpad_dataproto(prefix_output, prefix_pad_size)
         prefix_timing = prefix_output.meta_info.get("timing", {})
         prefix_output.meta_info.pop("timing", None)
+        self._drop_hpf_tree_unused_batch_keys(prefix_output)
 
         prefix_token_ids = self._extract_response_token_ids(prefix_output)
         prefix_lengths = np.array([len(token_ids) for token_ids in prefix_token_ids], dtype=np.int32)
@@ -1507,6 +1517,7 @@ class RayPPOTrainer:
             suffix_output = unpad_dataproto(suffix_output, suffix_pad_size)
             suffix_timing = suffix_output.meta_info.get("timing", {})
             suffix_output.meta_info.pop("timing", None)
+            self._drop_hpf_tree_unused_batch_keys(suffix_output)
             internal_sampling_keys = [
                 key
                 for key in ("__temperature__", "__top_p__", "__top_k__", "__max_tokens__", "__max_new_tokens__")
