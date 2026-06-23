@@ -121,9 +121,13 @@ def build_hpf_masked_batches(
     suffix_nonempty = suffix_mask.sum(dim=-1) > 0
     follower_batch = None
     if bool(suffix_nonempty.any()):
+        follower_update_batch = _clone_for_masked_update(batch, suffix_mask, follower_adv)[
+            suffix_nonempty.detach().cpu().numpy()
+        ]
         follower_batch = HPFMaskedBatch(
-            batch=_clone_for_masked_update(batch, suffix_mask, follower_adv),
+            batch=follower_update_batch,
             metrics={
+                "hpf/follower_batch_size": float(len(follower_update_batch)),
                 "hpf/follower_nonempty_frac": float(suffix_nonempty.float().mean().item()),
                 "hpf/follower_adv_mean": float(follower_adv.mean().item()),
                 "hpf/follower_adv_std": float(follower_adv.std(unbiased=True).item()),

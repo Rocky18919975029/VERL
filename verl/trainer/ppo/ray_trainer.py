@@ -1375,7 +1375,15 @@ class RayPPOTrainer:
         )
         metrics = dict(leader_batch.metrics)
         if follower_batch is not None:
-            follower_output = self._update_actor(follower_batch.batch)
+            follower_update_batch = follower_batch.batch
+            follower_mini_batch_size = (
+                self.config.actor_rollout_ref.actor.ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
+            )
+            follower_update_batch, follower_pad_size = pad_dataproto_to_divisor(
+                follower_update_batch, follower_mini_batch_size
+            )
+            metrics["hpf/follower_pad_size"] = float(follower_pad_size)
+            follower_output = self._update_actor(follower_update_batch)
             follower_metrics = reduce_metrics(follower_output.meta_info["metrics"])
             metrics.update(rename_dict(follower_metrics, "hpf/follower/"))
             metrics.update(follower_batch.metrics)
