@@ -501,7 +501,7 @@ class AgentLoopWorker:
             repetition_penalty=1.0,
             logprobs=config.calculate_log_probs,
         )
-        for key in ("temperature", "top_p", "top_k", "max_tokens", "max_new_tokens"):
+        for key in ("temperature", "top_p", "top_k", "max_tokens", "max_new_tokens", "logprobs"):
             if key in batch.meta_info:
                 sampling_params[key] = batch.meta_info[key]
 
@@ -555,6 +555,7 @@ class AgentLoopWorker:
             "__top_k__": "top_k",
             "__max_tokens__": "max_tokens",
             "__max_new_tokens__": "max_new_tokens",
+            "__logprobs__": "logprobs",
         }
         tasks = []
         for i in range(len(batch)):
