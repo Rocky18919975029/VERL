@@ -1479,13 +1479,6 @@ class RayPPOTrainer:
         needs_suffix = (prefix_lengths >= horizon) & (prefix_lengths < max_response_length)
         prefix_indices = np.tile(np.arange(num_prefixes, dtype=np.int32), len(gen_batch))
         problem_uids = np.asarray(prefix_batch.non_tensor_batch["uid"], dtype=object)
-        self._add_hpf_tree_metadata(
-            prefix_output,
-            problem_uids=problem_uids,
-            prefix_indices=prefix_indices,
-            suffix_indices=np.full(len(prefix_output), -1, dtype=np.int32),
-            prefix_token_ids=prefix_token_ids,
-        )
 
         suffix_output = None
         suffix_timing = {}
@@ -1497,18 +1490,6 @@ class RayPPOTrainer:
             repeated_source_indices = np.repeat(source_indices, num_suffixes)
             suffix_prefix_ids = [prefix_token_ids[index] for index in repeated_source_indices]
             suffix_source.non_tensor_batch["hpf_prefix_ids"] = self._object_array(suffix_prefix_ids)
-            suffix_source.non_tensor_batch["hpf_problem_uid"] = problem_uids[repeated_source_indices]
-            suffix_source.non_tensor_batch["hpf_prefix_index"] = prefix_indices[repeated_source_indices]
-            suffix_source.non_tensor_batch["hpf_suffix_index"] = np.tile(
-                np.arange(num_suffixes, dtype=np.int32), len(source_indices)
-            )
-            suffix_source.non_tensor_batch["hpf_prefix_uid"] = np.asarray(
-                [
-                    f"{problem_uids[index]}::prefix-{int(prefix_indices[index])}"
-                    for index in repeated_source_indices
-                ],
-                dtype=object,
-            )
             suffix_budgets = np.maximum(max_response_length - prefix_lengths[repeated_source_indices], 1)
             suffix_source.non_tensor_batch["__max_tokens__"] = suffix_budgets.astype(np.int32)
             suffix_source.meta_info["temperature"] = float(tree_config.get("suffix_temperature", 0.25))
@@ -1522,7 +1503,15 @@ class RayPPOTrainer:
             self._drop_hpf_tree_unused_batch_keys(suffix_output)
             internal_sampling_keys = [
                 key
-                for key in ("__temperature__", "__top_p__", "__top_k__", "__max_tokens__", "__max_new_tokens__")
+                for key in (
+                    "hpf_prefix_ids",
+                    "__temperature__",
+                    "__top_p__",
+                    "__top_k__",
+                    "__max_tokens__",
+                    "__max_new_tokens__",
+                    "__logprobs__",
+                )
                 if key in suffix_output.non_tensor_batch
             ]
             if internal_sampling_keys:
