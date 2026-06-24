@@ -63,9 +63,11 @@ def _make_prefix_suffix_masks(
 
 def _clone_for_masked_update(
     batch: DataProto,
-    mask: torch.Tensor,
+    pg_mask: torch.Tensor,
     scalar_advantages: torch.Tensor,
     old_log_probs: torch.Tensor | None = None,
+    kl_mask: torch.Tensor | None = None,
+    kl_ref_log_probs: torch.Tensor | None = None,
 ) -> DataProto:
     update_batch = batch.select(
         batch_keys=list(batch.batch.keys()),
@@ -74,10 +76,13 @@ def _clone_for_masked_update(
         deepcopy=True,
     )
     if old_log_probs is not None:
-        update_batch.batch["old_log_probs"] = old_log_probs.to(device=mask.device, dtype=torch.float32)
-    update_batch.batch["response_mask"] = mask
-    update_batch.batch["advantages"] = scalar_advantages.unsqueeze(-1).to(mask.device) * mask
+        update_batch.batch["old_log_probs"] = old_log_probs.to(device=pg_mask.device, dtype=torch.float32)
+    update_batch.batch["hpf_pg_mask"] = pg_mask
+    update_batch.batch["advantages"] = scalar_advantages.unsqueeze(-1).to(pg_mask.device) * pg_mask
     update_batch.batch["returns"] = update_batch.batch["advantages"]
+    if kl_mask is not None and kl_ref_log_probs is not None:
+        update_batch.batch["hpf_kl_mask"] = kl_mask
+        update_batch.batch["hpf_kl_ref_log_prob"] = kl_ref_log_probs.to(device=pg_mask.device, dtype=torch.float32)
     return update_batch
 
 
@@ -138,7 +143,12 @@ def build_hpf_masked_batches(
     follower_batch = None
     if bool(suffix_nonempty.any()):
         follower_update_batch = _clone_for_masked_update(
-            batch, suffix_mask, follower_adv, old_log_probs=follower_old_log_probs
+            batch,
+            suffix_mask,
+            follower_adv,
+            old_log_probs=follower_old_log_probs,
+            kl_mask=prefix_mask,
+            kl_ref_log_probs=leader_old_log_probs,
         )[
             suffix_nonempty.detach().cpu().numpy()
         ]
@@ -150,17 +160,12 @@ def build_hpf_masked_batches(
                 "hpf/follower_adv_mean": float(follower_adv.mean().item()),
                 "hpf/follower_adv_std": float(follower_adv.std(unbiased=True).item()),
             },
-            prefix_mask=prefix_mask,
-            suffix_mask=suffix_mask,
+            prefix_mask=prefix_mask[suffix_nonempty],
+            suffix_mask=suffix_mask[suffix_nonempty],
         )
 
     leader_batch = HPFMaskedBatch(
-        batch=_clone_for_masked_update(
-            batch,
-            prefix_mask,
-            leader_adv,
-            old_log_probs=leader_old_log_probs,
-        ),
+        batch=_clone_for_masked_update(batch, prefix_mask, leader_adv, old_log_probs=leader_old_log_probs),
         metrics={
             "hpf/enabled": 1.0,
             "hpf/round_index": float(round_index),

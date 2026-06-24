@@ -954,6 +954,33 @@ class EngineTrainModeCtx(BaseEngineCtx):
 
 @EngineRegistry.register(model_type="language_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
 class FSDPEngineWithLMHead(FSDPEngine):
+    @staticmethod
+    def _expand_temperature_as_input_ids(
+        temperature: torch.Tensor, input_ids: torch.Tensor, response_mask: torch.Tensor | None
+    ) -> torch.Tensor:
+        if temperature.dim() == 1:
+            return verl_F.expand_as_nested(temperature, input_ids)
+        if temperature.dim() != 2:
+            raise ValueError(f"temperature must have shape (bsz,) or (bsz, response_len), got {temperature.shape}")
+        if response_mask is None:
+            raise ValueError("response_mask is required for response-token temperature")
+
+        offsets = input_ids.offsets()
+        seq_lens = offsets.diff()
+        response_lens = response_mask.sum(dim=-1).long()
+        tensors = []
+        for idx, seq_len_tensor in enumerate(seq_lens):
+            seq_len = int(seq_len_tensor.item())
+            response_len = min(int(response_lens[idx].item()), int(temperature.shape[1]), seq_len)
+            seq_temperature = torch.ones(seq_len, dtype=temperature.dtype, device=temperature.device)
+            if response_len > 0:
+                prompt_len = seq_len - response_len
+                start = max(prompt_len - 1, 0)
+                end = min(start + response_len, seq_len)
+                seq_temperature[start:end] = temperature[idx, : end - start]
+            tensors.append(seq_temperature)
+        return torch.nested.as_nested_tensor(tensors, layout=torch.jagged)
+
     def prepare_model_inputs(self, micro_batch: TensorDict):
         use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)
         pad_mode = tu.get_non_tensor_data(data=micro_batch, key="pad_mode", default=DatasetPadMode.NO_PADDING)
@@ -975,15 +1002,19 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
         temperature = temperature.to(torch.float32)
         assert temperature.shape[0] == input_ids.shape[0]
+        if temperature.dim() not in {1, 2}:
+            raise ValueError(f"temperature must have shape (bsz,) or (bsz, response_len), got {temperature.shape}")
 
         # args used to get outputs
         output_args = {}
 
         if use_remove_padding:
-            # support per sample temperature
-            # temperature (bsz,)
+            # Support per-sample or response-token temperature.
             # input_ids (bsz, j1)
-            temperature_rmpad = verl_F.expand_as_nested(temperature, input_ids).values()  # (total_nnz,)
+            temperature_nested = self._expand_temperature_as_input_ids(
+                temperature, input_ids, micro_batch.get("response_mask", None)
+            )
+            temperature_rmpad = temperature_nested.values()  # (total_nnz,)
             temperature_rmpad = temperature_rmpad.unsqueeze(0)  # (1, total_nnz)
 
             if pad_mode == DatasetPadMode.NO_PADDING:

@@ -1378,36 +1378,23 @@ class RayPPOTrainer:
         return actor_output
 
     @staticmethod
-    def _set_hpf_phase_temperature(batch: DataProto, temperature: float) -> None:
-        device = batch.batch["response_mask"].device
-        batch.batch["temperature"] = torch.full((len(batch),), float(temperature), dtype=torch.float32, device=device)
-
-    @staticmethod
-    def _set_empty_hpf_kl_fields(batch: DataProto) -> None:
-        batch.batch["hpf_kl_ref_log_prob"] = torch.zeros_like(batch.batch["old_log_probs"], dtype=torch.float32)
-        batch.batch["hpf_kl_mask"] = torch.zeros_like(batch.batch["response_mask"])
-
-    def _build_hpf_phase_batch(
-        self,
+    def _set_hpf_token_temperatures(
+        batch: DataProto,
         *,
-        pg_batch: DataProto,
         pg_temperature: float,
-        kl_batch: DataProto | None,
         kl_temperature: float,
-        kl_coef: float,
-        kl_type: str,
-    ) -> DataProto:
-        self._set_hpf_phase_temperature(pg_batch, pg_temperature)
-        phase_parts = [pg_batch]
-        if kl_batch is not None and kl_coef > 0:
-            self._set_empty_hpf_kl_fields(pg_batch)
-            self._set_hpf_phase_temperature(kl_batch, kl_temperature)
-            phase_parts.append(kl_batch)
-        phase_batch = DataProto.concat(phase_parts)
-        if kl_batch is not None and kl_coef > 0:
-            phase_batch.meta_info["hpf_kl_coef"] = float(kl_coef)
-            phase_batch.meta_info["hpf_kl_type"] = kl_type
-        return phase_batch
+    ) -> None:
+        response_mask = batch.batch["response_mask"]
+        temperature = torch.ones_like(response_mask, dtype=torch.float32)
+        if "hpf_pg_mask" in batch.batch:
+            temperature = torch.where(
+                batch.batch["hpf_pg_mask"].bool(), torch.full_like(temperature, float(pg_temperature)), temperature
+            )
+        if "hpf_kl_mask" in batch.batch:
+            temperature = torch.where(
+                batch.batch["hpf_kl_mask"].bool(), torch.full_like(temperature, float(kl_temperature)), temperature
+            )
+        batch.batch["temperature"] = temperature
 
     @staticmethod
     def _parse_hpf_float(value: Any, default: float) -> float:
@@ -1416,35 +1403,6 @@ class RayPPOTrainer:
         if isinstance(value, str) and value.lower() in {"inf", "+inf", "infinity", "+infinity"}:
             return float("inf")
         return float(value)
-
-    @staticmethod
-    def _build_hpf_kl_update_batch(
-        batch: DataProto,
-        *,
-        mask: torch.Tensor,
-        ref_log_probs: torch.Tensor,
-        kl_coef: float,
-        kl_type: str,
-    ) -> DataProto | None:
-        nonempty = mask.sum(dim=-1) > 0
-        if not bool(nonempty.any()):
-            return None
-        update_batch = batch.select(
-            batch_keys=list(batch.batch.keys()),
-            non_tensor_batch_keys=list(batch.non_tensor_batch.keys()),
-            meta_info_keys=list(batch.meta_info.keys()),
-            deepcopy=True,
-        )
-        zero_advantages = torch.zeros_like(mask, dtype=torch.float32)
-        update_batch.batch["response_mask"] = mask
-        update_batch.batch["advantages"] = zero_advantages
-        update_batch.batch["returns"] = zero_advantages
-        update_batch.batch["old_log_probs"] = ref_log_probs.to(device=mask.device, dtype=torch.float32)
-        update_batch.batch["hpf_kl_ref_log_prob"] = ref_log_probs.to(device=mask.device, dtype=torch.float32)
-        update_batch.batch["hpf_kl_mask"] = mask
-        update_batch.meta_info["hpf_kl_coef"] = float(kl_coef)
-        update_batch.meta_info["hpf_kl_type"] = kl_type
-        return update_batch[nonempty.detach().cpu().numpy()]
 
     @staticmethod
     def _compute_hpf_suffix_correction(
@@ -1512,24 +1470,14 @@ class RayPPOTrainer:
             follower_mini_batch_size = (
                 self.config.actor_rollout_ref.actor.ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
             )
-            prefix_kl_batch = None
+            follower_phase_batch = follower_batch.batch
             if prefix_kl_coef > 0:
-                prefix_kl_batch = self._build_hpf_kl_update_batch(
-                    batch,
-                    mask=leader_batch.prefix_mask,
-                    ref_log_probs=leader_old_log_prob.batch["old_log_probs"],
-                    kl_coef=prefix_kl_coef,
-                    kl_type=self.config.actor_rollout_ref.actor.kl_loss_type,
-                )
-                if prefix_kl_batch is not None:
-                    metrics["hpf/follower_prefix_kl_batch_size"] = float(len(prefix_kl_batch))
-            follower_phase_batch = self._build_hpf_phase_batch(
-                pg_batch=follower_batch.batch,
+                follower_phase_batch.meta_info["hpf_kl_coef"] = float(prefix_kl_coef)
+                follower_phase_batch.meta_info["hpf_kl_type"] = self.config.actor_rollout_ref.actor.kl_loss_type
+            self._set_hpf_token_temperatures(
+                follower_phase_batch,
                 pg_temperature=suffix_temperature,
-                kl_batch=prefix_kl_batch,
                 kl_temperature=prefix_temperature,
-                kl_coef=prefix_kl_coef,
-                kl_type=self.config.actor_rollout_ref.actor.kl_loss_type,
             )
             follower_phase_batch, follower_pad_size = pad_dataproto_to_divisor(
                 follower_phase_batch, follower_mini_batch_size
@@ -1571,25 +1519,22 @@ class RayPPOTrainer:
             metrics["timing_s/hpf/suffix_correction_log_prob"] = float(time.perf_counter() - correction_start)
             leader_batch.batch.batch["advantages"] = leader_batch.batch.batch["advantages"] * correction.unsqueeze(-1)
 
-        suffix_kl_batch = None
         if suffix_kl_coef > 0 and leader_batch.suffix_mask is not None and follower_batch is not None:
             suffix_ref_log_prob = follower_updated_log_prob.batch["old_log_probs"]
-            suffix_kl_batch = self._build_hpf_kl_update_batch(
-                batch,
-                mask=leader_batch.suffix_mask,
-                ref_log_probs=suffix_ref_log_prob,
-                kl_coef=suffix_kl_coef,
-                kl_type=self.config.actor_rollout_ref.actor.kl_loss_type,
+            leader_batch.batch.batch["hpf_kl_ref_log_prob"] = suffix_ref_log_prob.to(
+                device=leader_batch.batch.batch["response_mask"].device, dtype=torch.float32
             )
-            if suffix_kl_batch is not None:
-                metrics["hpf/leader_suffix_kl_batch_size"] = float(len(suffix_kl_batch))
-        leader_phase_batch = self._build_hpf_phase_batch(
-            pg_batch=leader_batch.batch,
+            leader_batch.batch.batch["hpf_kl_mask"] = leader_batch.suffix_mask.to(
+                device=leader_batch.batch.batch["response_mask"].device
+            )
+            leader_batch.batch.meta_info["hpf_kl_coef"] = float(suffix_kl_coef)
+            leader_batch.batch.meta_info["hpf_kl_type"] = self.config.actor_rollout_ref.actor.kl_loss_type
+            metrics["hpf/leader_suffix_kl_batch_size"] = float(len(leader_batch.batch))
+        leader_phase_batch = leader_batch.batch
+        self._set_hpf_token_temperatures(
+            leader_phase_batch,
             pg_temperature=prefix_temperature,
-            kl_batch=suffix_kl_batch,
             kl_temperature=suffix_temperature,
-            kl_coef=suffix_kl_coef,
-            kl_type=self.config.actor_rollout_ref.actor.kl_loss_type,
         )
         leader_mini_batch_size = (
             self.config.actor_rollout_ref.actor.ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
