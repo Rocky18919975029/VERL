@@ -59,13 +59,20 @@ def _make_prefix_suffix_masks(
     return prefix_mask.to(response_mask.dtype), suffix_mask.to(response_mask.dtype)
 
 
-def _clone_for_masked_update(batch: DataProto, mask: torch.Tensor, scalar_advantages: torch.Tensor) -> DataProto:
+def _clone_for_masked_update(
+    batch: DataProto,
+    mask: torch.Tensor,
+    scalar_advantages: torch.Tensor,
+    old_log_probs: torch.Tensor | None = None,
+) -> DataProto:
     update_batch = batch.select(
         batch_keys=list(batch.batch.keys()),
         non_tensor_batch_keys=list(batch.non_tensor_batch.keys()),
         meta_info_keys=list(batch.meta_info.keys()),
         deepcopy=True,
     )
+    if old_log_probs is not None:
+        update_batch.batch["old_log_probs"] = old_log_probs.to(device=mask.device, dtype=torch.float32)
     update_batch.batch["response_mask"] = mask
     update_batch.batch["advantages"] = scalar_advantages.unsqueeze(-1).to(mask.device) * mask
     update_batch.batch["returns"] = update_batch.batch["advantages"]
@@ -79,6 +86,8 @@ def build_hpf_masked_batches(
     max_response_length: int,
     epsilon: float = 1e-6,
     std_normalize: bool = True,
+    follower_old_log_probs: torch.Tensor | None = None,
+    leader_old_log_probs: torch.Tensor | None = None,
 ) -> tuple[HPFMaskedBatch | None, HPFMaskedBatch]:
     """Build suffix/follower and prefix/leader masked update batches.
 
@@ -126,7 +135,9 @@ def build_hpf_masked_batches(
     suffix_nonempty = suffix_mask.sum(dim=-1) > 0
     follower_batch = None
     if bool(suffix_nonempty.any()):
-        follower_update_batch = _clone_for_masked_update(batch, suffix_mask, follower_adv)[
+        follower_update_batch = _clone_for_masked_update(
+            batch, suffix_mask, follower_adv, old_log_probs=follower_old_log_probs
+        )[
             suffix_nonempty.detach().cpu().numpy()
         ]
         follower_batch = HPFMaskedBatch(
@@ -140,7 +151,12 @@ def build_hpf_masked_batches(
         )
 
     leader_batch = HPFMaskedBatch(
-        batch=_clone_for_masked_update(batch, prefix_mask, leader_adv),
+        batch=_clone_for_masked_update(
+            batch,
+            prefix_mask,
+            leader_adv,
+            old_log_probs=leader_old_log_probs,
+        ),
         metrics={
             "hpf/enabled": 1.0,
             "hpf/round_index": float(round_index),

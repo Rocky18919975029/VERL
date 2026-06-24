@@ -1279,7 +1279,7 @@ class RayPPOTrainer:
 
         return ref_log_prob
 
-    def _compute_old_log_prob(self, batch: DataProto):
+    def _compute_old_log_prob(self, batch: DataProto, *, temperature: float | None = None):
         # TODO: remove step 1, 2, 4 after we make the whole training tensordict and padding free
         # step 1: convert dataproto to tensordict.
         batch_td = batch.to_tensordict()
@@ -1287,11 +1287,15 @@ class RayPPOTrainer:
         batch_td = left_right_2_no_padding(batch_td)
         # step 3: add meta info
         calculate_sum_pi_squared = self.config.actor_rollout_ref.actor.get("calculate_sum_pi_squared", False)
+        metadata = {}
+        if temperature is not None:
+            metadata["temperature"] = float(temperature)
         tu.assign_non_tensor(
             batch_td,
             calculate_entropy=True,
             calculate_sum_pi_squared=calculate_sum_pi_squared,
             compute_loss=False,
+            **metadata,
         )
         output = self.actor_rollout_wg.compute_log_prob(batch_td)
         # gather output
@@ -1322,11 +1326,12 @@ class RayPPOTrainer:
         *,
         progress_label: str | None = None,
         progress_log_interval: int | None = None,
+        temperature: float | None = None,
     ) -> DataProto:
         rollout_config = self.config.actor_rollout_ref.rollout
         batch.meta_info["multi_turn"] = rollout_config.multi_turn.enable
         # TODO: Make "temperature" single source of truth from generation.
-        batch.meta_info["temperature"] = rollout_config.temperature
+        batch.meta_info["temperature"] = rollout_config.temperature if temperature is None else float(temperature)
         # update actor
         batch_td = batch.to_tensordict()
         # step 2: convert from padding to no-padding
@@ -1356,7 +1361,9 @@ class RayPPOTrainer:
         )
         if progress_label is not None:
             actor_update_metadata["progress_label"] = progress_label
-            actor_update_metadata["progress_log_interval"] = 1 if progress_log_interval is None else int(progress_log_interval)
+            actor_update_metadata["progress_log_interval"] = (
+                1 if progress_log_interval is None else int(progress_log_interval)
+            )
         tu.assign_non_tensor(batch_td, **actor_update_metadata)
         actor_output = self.actor_rollout_wg.update_actor(batch_td)
         actor_output = tu.get(actor_output, "metrics")
@@ -1377,6 +1384,18 @@ class RayPPOTrainer:
         std_normalize = bool(
             hpf_config.get("std_normalize", self.config.algorithm.get("norm_adv_by_std_in_grpo", True))
         )
+        tree_config = hpf_config.get("tree_rollout", {})
+        prefix_temperature = float(
+            tree_config.get("prefix_temperature", self.config.actor_rollout_ref.rollout.temperature)
+        )
+        suffix_temperature = float(
+            tree_config.get("suffix_temperature", self.config.actor_rollout_ref.rollout.temperature)
+        )
+
+        old_log_start = time.perf_counter()
+        follower_old_log_prob, _ = self._compute_old_log_prob(batch, temperature=suffix_temperature)
+        leader_old_log_prob, _ = self._compute_old_log_prob(batch, temperature=prefix_temperature)
+        role_old_log_elapsed = time.perf_counter() - old_log_start
         follower_batch, leader_batch = build_hpf_masked_batches(
             batch=batch,
             round_index=self.global_steps,
@@ -1384,8 +1403,13 @@ class RayPPOTrainer:
             max_response_length=max_response_length,
             epsilon=epsilon,
             std_normalize=std_normalize,
+            follower_old_log_probs=follower_old_log_prob.batch["old_log_probs"],
+            leader_old_log_probs=leader_old_log_prob.batch["old_log_probs"],
         )
         metrics = dict(leader_batch.metrics)
+        metrics["hpf/prefix_loss_temperature"] = prefix_temperature
+        metrics["hpf/suffix_loss_temperature"] = suffix_temperature
+        metrics["timing_s/hpf/role_old_log_prob"] = float(role_old_log_elapsed)
         if follower_batch is not None:
             follower_update_batch = follower_batch.batch
             follower_mini_batch_size = (
@@ -1405,6 +1429,7 @@ class RayPPOTrainer:
                 follower_update_batch,
                 progress_label=f"hpf/follower/step-{self.global_steps}",
                 progress_log_interval=progress_log_interval,
+                temperature=suffix_temperature,
             )
             follower_elapsed = time.perf_counter() - follower_start
             print(
@@ -1426,6 +1451,7 @@ class RayPPOTrainer:
             leader_batch.batch,
             progress_label=f"hpf/leader/step-{self.global_steps}",
             progress_log_interval=progress_log_interval,
+            temperature=prefix_temperature,
         )
         leader_elapsed = time.perf_counter() - leader_start
         print(
