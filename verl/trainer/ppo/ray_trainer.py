@@ -1395,6 +1395,7 @@ class RayPPOTrainer:
                 batch.batch["hpf_kl_mask"].bool(), torch.full_like(temperature, float(kl_temperature)), temperature
             )
         batch.batch["temperature"] = temperature
+        batch.meta_info.pop("temperature", None)
 
     @staticmethod
     def _parse_hpf_float(value: Any, default: float) -> float:
