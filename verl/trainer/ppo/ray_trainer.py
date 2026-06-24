@@ -1374,6 +1374,63 @@ class RayPPOTrainer:
 
         return actor_output
 
+    @staticmethod
+    def _parse_hpf_float(value: Any, default: float) -> float:
+        if value is None:
+            return default
+        if isinstance(value, str) and value.lower() in {"inf", "+inf", "infinity", "+infinity"}:
+            return float("inf")
+        return float(value)
+
+    @staticmethod
+    def _build_hpf_kl_update_batch(
+        batch: DataProto,
+        *,
+        mask: torch.Tensor,
+        ref_log_probs: torch.Tensor,
+        kl_coef: float,
+        kl_type: str,
+    ) -> DataProto | None:
+        nonempty = mask.sum(dim=-1) > 0
+        if not bool(nonempty.any()):
+            return None
+        update_batch = batch.select(
+            batch_keys=list(batch.batch.keys()),
+            non_tensor_batch_keys=list(batch.non_tensor_batch.keys()),
+            meta_info_keys=list(batch.meta_info.keys()),
+            deepcopy=True,
+        )
+        zero_advantages = torch.zeros_like(mask, dtype=torch.float32)
+        update_batch.batch["response_mask"] = mask
+        update_batch.batch["advantages"] = zero_advantages
+        update_batch.batch["returns"] = zero_advantages
+        update_batch.batch["old_log_probs"] = ref_log_probs.to(device=mask.device, dtype=torch.float32)
+        update_batch.batch["hpf_kl_ref_log_prob"] = ref_log_probs.to(device=mask.device, dtype=torch.float32)
+        update_batch.batch["hpf_kl_mask"] = mask
+        update_batch.meta_info["hpf_kl_coef"] = float(kl_coef)
+        update_batch.meta_info["hpf_kl_type"] = kl_type
+        return update_batch[nonempty.detach().cpu().numpy()]
+
+    @staticmethod
+    def _compute_hpf_suffix_correction(
+        *,
+        updated_log_probs: torch.Tensor,
+        old_log_probs: torch.Tensor,
+        suffix_mask: torch.Tensor,
+        correction_clip: float,
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        delta = ((updated_log_probs - old_log_probs).to(suffix_mask.device) * suffix_mask).sum(dim=-1)
+        if np.isfinite(correction_clip):
+            delta = delta.clamp(min=-correction_clip, max=correction_clip)
+        correction = torch.exp(delta).detach()
+        return correction, {
+            "hpf/correction_log_ratio_mean": float(delta.mean().item()),
+            "hpf/correction_log_ratio_std": float(delta.std(unbiased=True).item()),
+            "hpf/correction_ratio_mean": float(correction.mean().item()),
+            "hpf/correction_ratio_max": float(correction.max().item()),
+            "hpf/correction_ratio_min": float(correction.min().item()),
+        }
+
     def _update_actor_hpf_masked_grpo(self, batch: DataProto) -> DataProto:
         hpf_update_start = time.perf_counter()
         hpf_config = self.config.algorithm.get("hpf_rlvr", {})
@@ -1381,6 +1438,9 @@ class RayPPOTrainer:
         max_response_length = int(hpf_config.get("max_response_length", self.config.data.max_response_length))
         epsilon = float(hpf_config.get("epsilon", 1e-6))
         progress_log_interval = int(hpf_config.get("progress_log_interval", 1))
+        prefix_kl_coef = float(hpf_config.get("prefix_kl_coef", 0.0))
+        suffix_kl_coef = float(hpf_config.get("suffix_kl_coef", 0.0))
+        correction_clip = self._parse_hpf_float(hpf_config.get("correction_clip", float("inf")), float("inf"))
         std_normalize = bool(
             hpf_config.get("std_normalize", self.config.algorithm.get("norm_adv_by_std_in_grpo", True))
         )
@@ -1410,6 +1470,9 @@ class RayPPOTrainer:
         metrics["hpf/prefix_loss_temperature"] = prefix_temperature
         metrics["hpf/suffix_loss_temperature"] = suffix_temperature
         metrics["timing_s/hpf/role_old_log_prob"] = float(role_old_log_elapsed)
+        metrics["hpf/prefix_kl_coef"] = prefix_kl_coef
+        metrics["hpf/suffix_kl_coef"] = suffix_kl_coef
+        metrics["hpf/correction_clip"] = correction_clip
         if follower_batch is not None:
             follower_update_batch = follower_batch.batch
             follower_mini_batch_size = (
@@ -1441,6 +1504,56 @@ class RayPPOTrainer:
             follower_metrics = reduce_metrics(follower_output.meta_info["metrics"])
             metrics.update(rename_dict(follower_metrics, "hpf/follower/"))
             metrics.update(follower_batch.metrics)
+
+            if prefix_kl_coef > 0:
+                prefix_kl_batch = self._build_hpf_kl_update_batch(
+                    batch,
+                    mask=leader_batch.prefix_mask,
+                    ref_log_probs=leader_old_log_prob.batch["old_log_probs"],
+                    kl_coef=prefix_kl_coef,
+                    kl_type=self.config.actor_rollout_ref.actor.kl_loss_type,
+                )
+                if prefix_kl_batch is not None:
+                    prefix_kl_batch, prefix_kl_pad_size = pad_dataproto_to_divisor(
+                        prefix_kl_batch, follower_mini_batch_size
+                    )
+                    metrics["hpf/follower_prefix_kl_pad_size"] = float(prefix_kl_pad_size)
+                    prefix_kl_start = time.perf_counter()
+                    print(
+                        "[HPF] follower prefix KL update start "
+                        f"step={self.global_steps} batch={len(prefix_kl_batch)} pad={prefix_kl_pad_size}",
+                        flush=True,
+                    )
+                    prefix_kl_output = self._update_actor(
+                        prefix_kl_batch,
+                        progress_label=f"hpf/follower_prefix_kl/step-{self.global_steps}",
+                        progress_log_interval=progress_log_interval,
+                        temperature=prefix_temperature,
+                    )
+                    prefix_kl_elapsed = time.perf_counter() - prefix_kl_start
+                    print(
+                        "[HPF] follower prefix KL update done "
+                        f"step={self.global_steps} elapsed_s={prefix_kl_elapsed:.2f}",
+                        flush=True,
+                    )
+                    metrics["timing_s/hpf/follower_prefix_kl_update_actor"] = float(prefix_kl_elapsed)
+                    prefix_kl_metrics = reduce_metrics(prefix_kl_output.meta_info["metrics"])
+                    metrics.update(rename_dict(prefix_kl_metrics, "hpf/follower_prefix_kl/"))
+
+        correction = torch.ones(len(leader_batch.batch), device=batch.batch["response_mask"].device)
+        if follower_batch is not None and leader_batch.suffix_mask is not None:
+            correction_start = time.perf_counter()
+            follower_updated_log_prob, _ = self._compute_old_log_prob(batch, temperature=suffix_temperature)
+            correction, correction_metrics = self._compute_hpf_suffix_correction(
+                updated_log_probs=follower_updated_log_prob.batch["old_log_probs"],
+                old_log_probs=follower_old_log_prob.batch["old_log_probs"],
+                suffix_mask=leader_batch.suffix_mask,
+                correction_clip=correction_clip,
+            )
+            metrics.update(correction_metrics)
+            metrics["timing_s/hpf/suffix_correction_log_prob"] = float(time.perf_counter() - correction_start)
+            leader_batch.batch.batch["advantages"] = leader_batch.batch.batch["advantages"] * correction.unsqueeze(-1)
+
         leader_start = time.perf_counter()
         print(
             "[HPF] leader actor update start "
@@ -1463,6 +1576,44 @@ class RayPPOTrainer:
         metrics["timing_s/hpf/update_actor_total"] = float(time.perf_counter() - hpf_update_start)
         leader_metrics = reduce_metrics(leader_output.meta_info["metrics"])
         metrics.update(rename_dict(leader_metrics, "hpf/leader/"))
+
+        if suffix_kl_coef > 0 and leader_batch.suffix_mask is not None and follower_batch is not None:
+            suffix_ref_log_prob = follower_updated_log_prob.batch["old_log_probs"]
+            suffix_kl_batch = self._build_hpf_kl_update_batch(
+                batch,
+                mask=leader_batch.suffix_mask,
+                ref_log_probs=suffix_ref_log_prob,
+                kl_coef=suffix_kl_coef,
+                kl_type=self.config.actor_rollout_ref.actor.kl_loss_type,
+            )
+            if suffix_kl_batch is not None:
+                suffix_kl_batch, suffix_kl_pad_size = pad_dataproto_to_divisor(
+                    suffix_kl_batch,
+                    self.config.actor_rollout_ref.actor.ppo_mini_batch_size
+                    * self.config.actor_rollout_ref.rollout.n,
+                )
+                metrics["hpf/leader_suffix_kl_pad_size"] = float(suffix_kl_pad_size)
+                suffix_kl_start = time.perf_counter()
+                print(
+                    "[HPF] leader suffix KL update start "
+                    f"step={self.global_steps} batch={len(suffix_kl_batch)} pad={suffix_kl_pad_size}",
+                    flush=True,
+                )
+                suffix_kl_output = self._update_actor(
+                    suffix_kl_batch,
+                    progress_label=f"hpf/leader_suffix_kl/step-{self.global_steps}",
+                    progress_log_interval=progress_log_interval,
+                    temperature=suffix_temperature,
+                )
+                suffix_kl_elapsed = time.perf_counter() - suffix_kl_start
+                print(
+                    "[HPF] leader suffix KL update done "
+                    f"step={self.global_steps} elapsed_s={suffix_kl_elapsed:.2f}",
+                    flush=True,
+                )
+                metrics["timing_s/hpf/leader_suffix_kl_update_actor"] = float(suffix_kl_elapsed)
+                suffix_kl_metrics = reduce_metrics(suffix_kl_output.meta_info["metrics"])
+                metrics.update(rename_dict(suffix_kl_metrics, "hpf/leader_suffix_kl/"))
         return DataProto.from_single_dict(data={}, meta_info={"metrics": metrics})
 
     @staticmethod

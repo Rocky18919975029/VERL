@@ -127,6 +127,15 @@ algorithm:
     # Whether to divide HPF group-relative advantages by group std.
     std_normalize: True
 
+    # Prefix KL regularizer coefficient in follower phase.
+    prefix_kl_coef: 0.001
+
+    # Suffix KL regularizer coefficient in leader phase.
+    suffix_kl_coef: 0.001
+
+    # Clip the suffix correction log-ratio to [-C, C]. Use "inf" to disable.
+    correction_clip: 5.0
+
     # Print actor-update mini/micro-batch progress every N micro-batches.
     # Set to 0 to disable. This is only used by the experimental HPF path.
     progress_log_interval: 1

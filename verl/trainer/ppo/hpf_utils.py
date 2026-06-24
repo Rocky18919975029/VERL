@@ -16,6 +16,8 @@ from verl import DataProto
 class HPFMaskedBatch:
     batch: DataProto
     metrics: dict[str, float]
+    prefix_mask: torch.Tensor | None = None
+    suffix_mask: torch.Tensor | None = None
 
 
 def _normalize_group_scores(
@@ -148,6 +150,8 @@ def build_hpf_masked_batches(
                 "hpf/follower_adv_mean": float(follower_adv.mean().item()),
                 "hpf/follower_adv_std": float(follower_adv.std(unbiased=True).item()),
             },
+            prefix_mask=prefix_mask,
+            suffix_mask=suffix_mask,
         )
 
     leader_batch = HPFMaskedBatch(
@@ -170,5 +174,7 @@ def build_hpf_masked_batches(
             "hpf/minimal_grouping": 0.0 if has_tree_groups else 1.0,
             "hpf/leader_prefix_groups": float(len(np.unique(prefix_group_ids))),
         },
+        prefix_mask=prefix_mask,
+        suffix_mask=suffix_mask,
     )
     return follower_batch, leader_batch

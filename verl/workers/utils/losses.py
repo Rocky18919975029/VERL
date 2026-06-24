@@ -88,6 +88,10 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         fields.append("rollout_is_weights")
     if "ref_log_prob" in data:
         fields.append("ref_log_prob")
+    hpf_kl_coef = float(tu.get_non_tensor_data(data=data, key="hpf_kl_coef", default=0.0) or 0.0)
+    hpf_kl_type = tu.get_non_tensor_data(data=data, key="hpf_kl_type", default=config.kl_loss_type)
+    if hpf_kl_coef > 0:
+        fields.extend(["hpf_kl_ref_log_prob", "hpf_kl_mask"])
     data = data.select(*fields).to_padded_tensor()
 
     response_mask = data["response_mask"].to(bool)
@@ -140,6 +144,20 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         policy_loss += kl_loss * config.kl_loss_coef
         metrics["kl_loss"] = Metric(value=kl_loss, aggregation=metric_aggregation)
         metrics["kl_coef"] = config.kl_loss_coef
+
+    if hpf_kl_coef > 0:
+        hpf_kl_ref_log_prob = data["hpf_kl_ref_log_prob"]
+        hpf_kl_mask = data["hpf_kl_mask"].to(bool)
+        hpf_kld = kl_penalty(logprob=log_prob, ref_logprob=hpf_kl_ref_log_prob, kl_penalty=hpf_kl_type)
+        hpf_kl_loss = agg_loss(
+            loss_mat=hpf_kld,
+            loss_mask=hpf_kl_mask,
+            loss_agg_mode=config.loss_agg_mode,
+            **config.global_batch_info,
+        )
+        policy_loss += hpf_kl_coef * hpf_kl_loss
+        metrics["actor/hpf_kl_loss"] = Metric(value=hpf_kl_loss, aggregation=metric_aggregation)
+        metrics["actor/hpf_kl_coef"] = hpf_kl_coef
 
     return policy_loss, metrics
 
