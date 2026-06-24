@@ -2209,6 +2209,10 @@ class RayPPOTrainer:
                         "training/epoch": epoch,
                     }
                 )
+                if self.config.algorithm.get("hpf_rlvr", {}).get("enable", False) and "advantages" not in batch.batch:
+                    metrics["hpf/metrics_placeholder_advantages"] = 1.0
+                    batch.batch["advantages"] = torch.zeros_like(batch.batch["response_mask"], dtype=torch.float32)
+                    batch.batch["returns"] = torch.zeros_like(batch.batch["response_mask"], dtype=torch.float32)
                 # collect metrics
                 metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
                 # GDPO per-component reward metrics
