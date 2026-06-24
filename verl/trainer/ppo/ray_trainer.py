@@ -1905,7 +1905,14 @@ class RayPPOTrainer:
                     #   Note: π_old computed once per data batch, serves as stable reference during mini-batch updates
                     rollout_corr_config = self.config.algorithm.get("rollout_correction", None)
                     bypass_recomputing_logprobs = rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
-                    if bypass_recomputing_logprobs:  # Use `rollout_log_probs`
+                    skip_shared_old_log_prob = (
+                        use_hpf_tree_rollout
+                        and not self.config.algorithm.use_kl_in_reward
+                        and rollout_corr_config is None
+                    )
+                    if skip_shared_old_log_prob:
+                        metrics["hpf/skipped_shared_old_log_prob"] = 1.0
+                    elif bypass_recomputing_logprobs:  # Use `rollout_log_probs`
                         from verl.trainer.ppo.rollout_corr_helper import apply_bypass_mode
 
                         apply_bypass_mode(
@@ -1946,7 +1953,8 @@ class RayPPOTrainer:
 
                                 metrics.update(calculate_debug_metrics(batch))
 
-                    assert "old_log_probs" in batch.batch, f'"old_log_prob" not in {batch.batch.keys()=}'
+                    if not skip_shared_old_log_prob:
+                        assert "old_log_probs" in batch.batch, f'"old_log_prob" not in {batch.batch.keys()=}'
 
                     if self.use_reference_policy:
                         # compute reference log_prob
@@ -1977,35 +1985,42 @@ class RayPPOTrainer:
                         else:
                             batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
 
-                        # Compute rollout correction: IS weights, rejection sampling, and metrics
-                        # Only runs in decoupled mode (computes once per batch using stable π_old)
-                        # In bypass mode, this is skipped - actor computes metrics from evolving π_θ vs π_rollout
-                        if (
-                            rollout_corr_config is not None
-                            and "rollout_log_probs" in batch.batch
-                            and not bypass_recomputing_logprobs  # Only in decoupled mode
-                        ):
-                            from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_and_add_to_batch
+                        if use_hpf_tree_rollout:
+                            metrics["hpf/skipped_shared_advantage"] = 1.0
+                        else:
+                            # Compute rollout correction: IS weights, rejection sampling, and metrics
+                            # Only runs in decoupled mode (computes once per batch using stable π_old)
+                            # In bypass mode, this is skipped - actor computes metrics from evolving π_θ vs π_rollout
+                            if (
+                                rollout_corr_config is not None
+                                and "rollout_log_probs" in batch.batch
+                                and not bypass_recomputing_logprobs  # Only in decoupled mode
+                            ):
+                                from verl.trainer.ppo.rollout_corr_helper import (
+                                    compute_rollout_correction_and_add_to_batch,
+                                )
 
-                            # Compute IS weights, apply rejection sampling, compute metrics
-                            batch, is_metrics = compute_rollout_correction_and_add_to_batch(batch, rollout_corr_config)
-                            # IS and off-policy metrics already have rollout_corr/ prefix
-                            metrics.update(is_metrics)
+                                # Compute IS weights, apply rejection sampling, compute metrics
+                                batch, is_metrics = compute_rollout_correction_and_add_to_batch(
+                                    batch, rollout_corr_config
+                                )
+                                # IS and off-policy metrics already have rollout_corr/ prefix
+                                metrics.update(is_metrics)
 
-                        # compute advantages, executed on the driver process
-                        norm_adv_by_std_in_grpo = self.config.algorithm.get(
-                            "norm_adv_by_std_in_grpo", True
-                        )  # GRPO adv normalization factor
+                            # compute advantages, executed on the driver process
+                            norm_adv_by_std_in_grpo = self.config.algorithm.get(
+                                "norm_adv_by_std_in_grpo", True
+                            )  # GRPO adv normalization factor
 
-                        batch = compute_advantage(
-                            batch,
-                            adv_estimator=self.config.algorithm.adv_estimator,
-                            gamma=self.config.algorithm.gamma,
-                            lam=self.config.algorithm.lam,
-                            num_repeat=self.config.actor_rollout_ref.rollout.n,
-                            norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
-                            config=self.config.algorithm,
-                        )
+                            batch = compute_advantage(
+                                batch,
+                                adv_estimator=self.config.algorithm.adv_estimator,
+                                gamma=self.config.algorithm.gamma,
+                                lam=self.config.algorithm.lam,
+                                num_repeat=self.config.actor_rollout_ref.rollout.n,
+                                norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+                                config=self.config.algorithm,
+                            )
 
                     # update critic
                     if self.use_critic:
