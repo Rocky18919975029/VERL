@@ -25,6 +25,7 @@ HPF_TREE_PREFIX_TEMPERATURE=${HPF_TREE_PREFIX_TEMPERATURE:-1.0}
 HPF_TREE_PREFIX_TOP_P=${HPF_TREE_PREFIX_TOP_P:-1.0}
 HPF_TREE_SUFFIX_TEMPERATURE=${HPF_TREE_SUFFIX_TEMPERATURE:-0.25}
 HPF_TREE_SUFFIX_TOP_P=${HPF_TREE_SUFFIX_TOP_P:-1.0}
+HPF_LOSS_AGG_MODE=${HPF_LOSS_AGG_MODE:-token-mean}
 
 HPF_ARGS=(
     algorithm.hpf_rlvr.enable=True
@@ -36,6 +37,7 @@ HPF_ARGS=(
     algorithm.hpf_rlvr.suffix_kl_coef="${HPF_SUFFIX_KL_COEF}"
     algorithm.hpf_rlvr.correction_clip="${HPF_CORRECTION_CLIP}"
     algorithm.hpf_rlvr.progress_log_interval="${HPF_PROGRESS_LOG_INTERVAL}"
+    actor_rollout_ref.actor.loss_agg_mode="${HPF_LOSS_AGG_MODE}"
 )
 
 if [ "${HPF_TREE_ROLLOUT}" = "True" ] || [ "${HPF_TREE_ROLLOUT}" = "true" ] || [ "${HPF_TREE_ROLLOUT}" = "1" ]; then

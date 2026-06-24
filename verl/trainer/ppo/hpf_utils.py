@@ -42,6 +42,43 @@ def _normalize_group_scores(
     return out
 
 
+def _normalize_repeated_prefix_scores(
+    scores: torch.Tensor,
+    problem_ids: np.ndarray,
+    prefix_group_ids: np.ndarray,
+    epsilon: float,
+    std_normalize: bool,
+) -> torch.Tensor:
+    out = torch.zeros_like(scores, dtype=torch.float32)
+    for problem_id in np.unique(problem_ids):
+        problem_idx_np = np.nonzero(problem_ids == problem_id)[0]
+        problem_prefix_ids = prefix_group_ids[problem_idx_np]
+        unique_prefix_ids = np.unique(problem_prefix_ids)
+        if len(unique_prefix_ids) <= 1:
+            continue
+
+        prefix_rows = []
+        prefix_scores = []
+        for prefix_group_id in unique_prefix_ids:
+            rows_np = problem_idx_np[np.nonzero(problem_prefix_ids == prefix_group_id)[0]]
+            rows = torch.as_tensor(rows_np, device=scores.device, dtype=torch.long)
+            prefix_rows.append(rows)
+            prefix_scores.append(scores[rows[0]].float())
+
+        group_scores = torch.stack(prefix_scores)
+        centered = group_scores - group_scores.mean()
+        if std_normalize:
+            std = group_scores.std(unbiased=True)
+            if torch.isfinite(std) and std > 0:
+                centered = centered / (std + epsilon)
+            else:
+                centered = torch.zeros_like(centered)
+
+        for rows, value in zip(prefix_rows, centered, strict=True):
+            out[rows] = value
+    return out
+
+
 def _group_ids(*arrays: np.ndarray) -> np.ndarray:
     return np.array(["::".join(map(str, values)) for values in zip(*arrays, strict=True)], dtype=object)
 
@@ -137,7 +174,13 @@ def build_hpf_masked_batches(
         idx_np = np.nonzero(prefix_group_ids == prefix_group_id)[0]
         idx = torch.as_tensor(idx_np, device=device, dtype=torch.long)
         leader_reward[idx] = correct[idx].max()
-    leader_adv = _normalize_group_scores(leader_reward, problem_ids, epsilon, std_normalize)
+    leader_adv = _normalize_repeated_prefix_scores(
+        leader_reward,
+        problem_ids,
+        prefix_group_ids,
+        epsilon,
+        std_normalize,
+    )
 
     suffix_nonempty = suffix_mask.sum(dim=-1) > 0
     follower_batch = None
