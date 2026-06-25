@@ -127,6 +127,15 @@ algorithm:
     # Whether to divide HPF group-relative advantages by group std.
     std_normalize: True
 
+    # How to advance the progressive prefix horizon. "epoch" keeps the same
+    # horizon within an epoch, while "step" advances every fixed number of
+    # global training steps.
+    horizon_schedule: epoch
+
+    # Number of global training steps between horizon updates when
+    # horizon_schedule is "step".
+    horizon_update_interval_steps: 1
+
     # Prefix KL regularizer coefficient in follower phase.
     prefix_kl_coef: 0.001
 
