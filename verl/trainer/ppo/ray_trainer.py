@@ -1405,6 +1405,21 @@ class RayPPOTrainer:
             return float("inf")
         return float(value)
 
+    def _get_hpf_round_index(self, epoch: int | None) -> int:
+        hpf_config = self.config.algorithm.get("hpf_rlvr", {})
+        schedule = str(hpf_config.get("horizon_schedule", "epoch")).lower()
+        if schedule == "epoch":
+            if epoch is not None:
+                return int(epoch) + 1
+            steps_per_epoch = max(len(self.train_dataloader), 1)
+            return max((self.global_steps - 1) // steps_per_epoch + 1, 1)
+        if schedule in {"step", "global_step"}:
+            interval = int(hpf_config.get("horizon_update_interval_steps", 1))
+            if interval <= 0:
+                raise ValueError(f"hpf_rlvr.horizon_update_interval_steps must be positive, got {interval}")
+            return max((self.global_steps - 1) // interval + 1, 1)
+        raise ValueError(f"Unsupported HPF horizon_schedule={schedule!r}; expected 'epoch' or 'step'")
+
     @staticmethod
     def _compute_hpf_suffix_correction(
         *,
@@ -1425,7 +1440,7 @@ class RayPPOTrainer:
             "hpf/correction_ratio_min": float(correction.min().item()),
         }
 
-    def _update_actor_hpf_masked_grpo(self, batch: DataProto) -> DataProto:
+    def _update_actor_hpf_masked_grpo(self, batch: DataProto, hpf_round_index: int | None = None) -> DataProto:
         hpf_update_start = time.perf_counter()
         hpf_config = self.config.algorithm.get("hpf_rlvr", {})
         progressive_block_size = int(hpf_config.get("progressive_block_size", 256))
@@ -1450,9 +1465,11 @@ class RayPPOTrainer:
         follower_old_log_prob, _ = self._compute_old_log_prob(batch, temperature=suffix_temperature)
         leader_old_log_prob, _ = self._compute_old_log_prob(batch, temperature=prefix_temperature)
         role_old_log_elapsed = time.perf_counter() - old_log_start
+        if hpf_round_index is None:
+            hpf_round_index = self._get_hpf_round_index(None)
         follower_batch, leader_batch = build_hpf_masked_batches(
             batch=batch,
-            round_index=self.global_steps,
+            round_index=hpf_round_index,
             progressive_block_size=progressive_block_size,
             max_response_length=max_response_length,
             epsilon=epsilon,
@@ -1612,7 +1629,9 @@ class RayPPOTrainer:
         if drop_keys:
             output.pop(batch_keys=drop_keys)
 
-    def _generate_hpf_tree_sequences(self, gen_batch: DataProto) -> tuple[DataProto, dict[str, float]]:
+    def _generate_hpf_tree_sequences(
+        self, gen_batch: DataProto, hpf_round_index: int | None = None
+    ) -> tuple[DataProto, dict[str, float]]:
         tree_start = time.perf_counter()
         if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
             raise ValueError("HPF tree rollout does not support REMAX baseline generation.")
@@ -1633,10 +1652,12 @@ class RayPPOTrainer:
 
         max_response_length = int(hpf_config.get("max_response_length", self.config.data.max_response_length))
         progressive_block_size = int(hpf_config.get("progressive_block_size", 256))
-        horizon = min(int(self.global_steps) * progressive_block_size, max_response_length)
+        if hpf_round_index is None:
+            hpf_round_index = self._get_hpf_round_index(None)
+        horizon = min(int(hpf_round_index) * progressive_block_size, max_response_length)
         print(
             "[HPF] tree rollout start "
-            f"step={self.global_steps} prompts={len(gen_batch)} prefixes={num_prefixes} "
+            f"step={self.global_steps} round={hpf_round_index} prompts={len(gen_batch)} prefixes={num_prefixes} "
             f"suffixes={num_suffixes} horizon={horizon} max_response={max_response_length}",
             flush=True,
         )
@@ -1766,6 +1787,7 @@ class RayPPOTrainer:
         )
         tree_metrics = {
             "hpf/tree_rollout_enabled": 1.0,
+            "hpf/horizon_round_index": float(hpf_round_index),
             "hpf/tree_num_prefixes": float(num_prefixes),
             "hpf/tree_num_suffixes": float(num_suffixes),
             "hpf/tree_horizon_tokens": float(horizon),
@@ -1906,6 +1928,7 @@ class RayPPOTrainer:
                 gen_batch.meta_info["global_steps"] = self.global_steps
                 rollout_n = self.config.actor_rollout_ref.rollout.n
                 use_hpf_tree_rollout = self._hpf_tree_rollout_enabled()
+                hpf_round_index = self._get_hpf_round_index(epoch) if use_hpf_tree_rollout else None
                 gen_batch_output = gen_batch.repeat(repeat_times=rollout_n, interleave=True)
 
                 if use_hpf_tree_rollout:
@@ -1932,7 +1955,9 @@ class RayPPOTrainer:
                         if curr_step_profile:
                             self.llm_server_manager.start_profile()
                         if use_hpf_tree_rollout:
-                            gen_batch_output, hpf_tree_metrics = self._generate_hpf_tree_sequences(gen_batch)
+                            gen_batch_output, hpf_tree_metrics = self._generate_hpf_tree_sequences(
+                                gen_batch, hpf_round_index=hpf_round_index
+                            )
                             metrics.update(hpf_tree_metrics)
                             timing_raw.update(gen_batch_output.meta_info["timing"])
                             gen_batch_output.meta_info.pop("timing", None)
@@ -2137,7 +2162,9 @@ class RayPPOTrainer:
                         # update actor
                         with marked_timer("update_actor", timing_raw, color="red"):
                             if self.config.algorithm.get("hpf_rlvr", {}).get("enable", False):
-                                actor_output = self._update_actor_hpf_masked_grpo(batch)
+                                actor_output = self._update_actor_hpf_masked_grpo(
+                                    batch, hpf_round_index=hpf_round_index
+                                )
                             else:
                                 actor_output = self._update_actor(batch)
 
