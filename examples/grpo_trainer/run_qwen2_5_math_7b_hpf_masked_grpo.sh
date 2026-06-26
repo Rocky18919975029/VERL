@@ -28,6 +28,29 @@ HPF_TREE_PREFIX_TOP_P=${HPF_TREE_PREFIX_TOP_P:-1.0}
 HPF_TREE_SUFFIX_TEMPERATURE=${HPF_TREE_SUFFIX_TEMPERATURE:-0.25}
 HPF_TREE_SUFFIX_TOP_P=${HPF_TREE_SUFFIX_TOP_P:-1.0}
 HPF_LOSS_AGG_MODE=${HPF_LOSS_AGG_MODE:-token-mean}
+
+# A suffix KL to theta_F is exactly zero on the first leader optimizer step.
+# Keep at least two mini-batches per HPF phase by default so the second and
+# later steps evaluate the combined PG+KL loss after the policy has moved.
+HPF_TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-512}
+HPF_MICRO_BATCH_SIZE=${PPO_MICRO_BATCH_SIZE_PER_GPU:-8}
+if [ -z "${PPO_MINI_BATCH_SIZE+x}" ]; then
+    HPF_PPO_MINI_TARGET=$((HPF_TRAIN_BATCH_SIZE / 2))
+    if [ "${HPF_PPO_MINI_TARGET}" -gt 32 ]; then
+        HPF_PPO_MINI_TARGET=32
+    fi
+    PPO_MINI_BATCH_SIZE=$(((HPF_PPO_MINI_TARGET / HPF_MICRO_BATCH_SIZE) * HPF_MICRO_BATCH_SIZE))
+    if [ "${PPO_MINI_BATCH_SIZE}" -lt "${HPF_MICRO_BATCH_SIZE}" ]; then
+        PPO_MINI_BATCH_SIZE=${HPF_MICRO_BATCH_SIZE}
+    fi
+fi
+HPF_LEADER_MINI_BATCHES=$(((HPF_TRAIN_BATCH_SIZE + PPO_MINI_BATCH_SIZE - 1) / PPO_MINI_BATCH_SIZE))
+if [ "${HPF_SUFFIX_KL_COEF}" != "0" ] && [ "${HPF_SUFFIX_KL_COEF}" != "0.0" ] \
+    && [ "${HPF_LEADER_MINI_BATCHES}" -lt 2 ]; then
+    echo "HPF suffix KL needs at least two leader mini-batches per phase; set PPO_MINI_BATCH_SIZE below TRAIN_BATCH_SIZE." >&2
+    exit 1
+fi
+export PPO_MINI_BATCH_SIZE
 # HPF smoke runs are used to validate exact continuation. Keep the native
 # FSDP model, optimizer, and extra state in addition to the HF export.
 SAVE_CONTENTS=${SAVE_CONTENTS:-${ACTOR_CHECKPOINT_SAVE_CONTENTS:-"['model','optimizer','extra','hf_model']"}}
@@ -64,6 +87,7 @@ fi
 
 PROJECT_NAME="${PROJECT_NAME}" \
 RUN_NAME="${RUN_NAME}" \
+PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE}" \
 bash examples/grpo_trainer/run_qwen2_5_math_7b_grpo_reschedule_baseline.sh \
     "${HPF_ARGS[@]}" \
     "$@"

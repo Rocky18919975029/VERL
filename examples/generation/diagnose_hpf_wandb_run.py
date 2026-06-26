@@ -30,6 +30,9 @@ DEFAULT_METRICS = (
     "hpf/leader/actor/hpf_kl_loss",
     "hpf/correction_log_ratio_mean",
     "hpf/correction_log_ratio_std",
+    "hpf/correction_clip_upper_frac",
+    "hpf/correction_clip_lower_frac",
+    "hpf/correction_clip_frac",
     "hpf/correction_ratio_mean",
     "hpf/correction_ratio_max",
     "hpf/correction_ratio_min",
@@ -41,6 +44,8 @@ DEFAULT_METRICS = (
     "timing_s/hpf/suffix_correction_log_prob",
     "timing_s/hpf/leader_update_actor",
     "timing_s/hpf/update_actor_total",
+    "hpf/follower_optimizer_steps",
+    "hpf/leader_optimizer_steps",
 )
 
 TIMING_METRICS = tuple(metric for metric in DEFAULT_METRICS if metric.startswith("timing_s/"))
@@ -149,6 +154,21 @@ def diagnostics(summaries: dict[str, dict[str, float | int]], metrics: dict[str,
             notes.append("Correction ratio is occasionally large (>10); inspect its max curve.")
         else:
             notes.append("Correction ratio remained below 10 in this run.")
+
+    clipped_fraction = summaries.get("hpf/correction_clip_frac")
+    if clipped_fraction:
+        notes.append(
+            "Mean correction clipping fraction is "
+            f"{float(clipped_fraction['mean']):.2%} (max {float(clipped_fraction['max']):.2%})."
+        )
+
+    leader_kl = summaries.get("hpf/leader/actor/hpf_kl_loss")
+    leader_steps = summaries.get("hpf/leader_optimizer_steps")
+    if leader_kl and float(leader_kl["max"]) == 0.0:
+        if leader_steps and float(leader_steps["max"]) <= 1:
+            notes.append("Leader KL is zero because each leader phase has only one optimizer step.")
+        else:
+            notes.append("Leader KL is zero despite multiple leader optimizer steps; inspect the leader KL mask and reference.")
 
     total = summaries.get("timing_s/hpf/update_actor_total")
     rollout = summaries.get("timing_s/hpf/tree_rollout_total_wall")

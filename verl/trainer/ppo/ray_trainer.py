@@ -19,6 +19,7 @@ This trainer supports model-agonistic model initialization with huggingface
 """
 
 import json
+import math
 import os
 import time
 import uuid
@@ -1428,11 +1429,19 @@ class RayPPOTrainer:
         suffix_mask: torch.Tensor,
         correction_clip: float,
     ) -> tuple[torch.Tensor, dict[str, float]]:
-        delta = ((updated_log_probs - old_log_probs).to(suffix_mask.device) * suffix_mask).sum(dim=-1)
+        raw_delta = ((updated_log_probs - old_log_probs).to(suffix_mask.device) * suffix_mask).sum(dim=-1)
+        delta = raw_delta
+        clipped_upper = torch.zeros_like(raw_delta, dtype=torch.bool)
+        clipped_lower = torch.zeros_like(raw_delta, dtype=torch.bool)
         if np.isfinite(correction_clip):
+            clipped_upper = raw_delta > correction_clip
+            clipped_lower = raw_delta < -correction_clip
             delta = delta.clamp(min=-correction_clip, max=correction_clip)
         correction = torch.exp(delta).detach()
         return correction, {
+            "hpf/correction_clip_upper_frac": float(clipped_upper.float().mean().item()),
+            "hpf/correction_clip_lower_frac": float(clipped_lower.float().mean().item()),
+            "hpf/correction_clip_frac": float((clipped_upper | clipped_lower).float().mean().item()),
             "hpf/correction_log_ratio_mean": float(delta.mean().item()),
             "hpf/correction_log_ratio_std": float(delta.std(unbiased=True).item()),
             "hpf/correction_ratio_mean": float(correction.mean().item()),
@@ -1501,6 +1510,10 @@ class RayPPOTrainer:
                 follower_phase_batch, follower_mini_batch_size
             )
             metrics["hpf/follower_pad_size"] = float(follower_pad_size)
+            metrics["hpf/follower_optimizer_steps"] = float(
+                math.ceil(len(follower_phase_batch) / follower_mini_batch_size)
+                * self.config.actor_rollout_ref.actor.ppo_epochs
+            )
             follower_start = time.perf_counter()
             print(
                 "[HPF] follower actor update start "
@@ -1559,6 +1572,10 @@ class RayPPOTrainer:
         )
         leader_phase_batch, leader_pad_size = pad_dataproto_to_divisor(leader_phase_batch, leader_mini_batch_size)
         metrics["hpf/leader_pad_size"] = float(leader_pad_size)
+        metrics["hpf/leader_optimizer_steps"] = float(
+            math.ceil(len(leader_phase_batch) / leader_mini_batch_size)
+            * self.config.actor_rollout_ref.actor.ppo_epochs
+        )
         leader_start = time.perf_counter()
         print(
             "[HPF] leader actor update start "
