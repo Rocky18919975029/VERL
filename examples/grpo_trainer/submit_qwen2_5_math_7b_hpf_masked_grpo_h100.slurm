@@ -121,14 +121,16 @@ export TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST:-9.0}
 mkdir -p "${WANDB_DIR}" "${RAY_TMP_DIR}"
 
 PROJECT_NAME=${PROJECT_NAME:-hpf_masked_grpo_dapo_math17k}
-EXPERIMENT_NAME=${EXPERIMENT_NAME:-qwen2_5_math_7b_hpf_masked_grpo_${SLURM_JOB_ID}}
+# RUN_NAME is the canonical training/checkpoint name. Keep EXPERIMENT_NAME as
+# a backwards-compatible alias for older submission commands.
+RUN_NAME=${RUN_NAME:-${EXPERIMENT_NAME:-qwen2_5_math_7b_hpf_masked_grpo_${SLURM_JOB_ID}}}
 
 echo "Job ID: ${SLURM_JOB_ID}"
 echo "Node list: ${SLURM_JOB_NODELIST}"
 echo "Working directory: ${VERL_WORKDIR}"
 echo "Ray tmp dir: ${RAY_TMP_DIR}"
 echo "Project: ${PROJECT_NAME}"
-echo "Experiment: ${EXPERIMENT_NAME}"
+echo "Run name: ${RUN_NAME}"
 echo "Model: ${MODEL_PATH}"
 echo "Data dir: ${DATA_DIR}"
 echo "Total training steps: ${TOTAL_TRAINING_STEPS:-2}"
@@ -151,7 +153,7 @@ echo "vLLM GPU memory utilization: ${ROLLOUT_GPU_MEMORY_UTILIZATION}"
 MODEL_PATH="${MODEL_PATH}" \
 DATA_DIR="${DATA_DIR}" \
 PROJECT_NAME="${PROJECT_NAME}" \
-RUN_NAME="${EXPERIMENT_NAME}" \
+RUN_NAME="${RUN_NAME}" \
 MODE="${MODE:-train}" \
 TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-2}" \
 ACTOR_PARAM_OFFLOAD="${ACTOR_PARAM_OFFLOAD}" \
