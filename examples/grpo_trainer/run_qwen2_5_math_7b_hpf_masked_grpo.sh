@@ -28,6 +28,10 @@ HPF_TREE_PREFIX_TOP_P=${HPF_TREE_PREFIX_TOP_P:-1.0}
 HPF_TREE_SUFFIX_TEMPERATURE=${HPF_TREE_SUFFIX_TEMPERATURE:-0.25}
 HPF_TREE_SUFFIX_TOP_P=${HPF_TREE_SUFFIX_TOP_P:-1.0}
 HPF_LOSS_AGG_MODE=${HPF_LOSS_AGG_MODE:-token-mean}
+# HPF smoke runs are used to validate exact continuation. Keep the native
+# FSDP model, optimizer, and extra state in addition to the HF export.
+SAVE_CONTENTS=${SAVE_CONTENTS:-${ACTOR_CHECKPOINT_SAVE_CONTENTS:-"['model','optimizer','extra','hf_model']"}}
+export SAVE_CONTENTS
 
 HPF_ARGS=(
     algorithm.hpf_rlvr.enable=True
