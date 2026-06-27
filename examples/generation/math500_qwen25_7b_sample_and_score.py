@@ -42,6 +42,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dtype", default="bfloat16")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--score-batch-size", type=int, default=64)
+    parser.add_argument("--skip-loglik-scoring", action="store_true")
     parser.add_argument("--limit", type=int, default=None, help="Optional row limit for debugging.")
     parser.add_argument("--num-shards", type=int, default=1, help="Split dataset into this many interleaved shards.")
     parser.add_argument("--shard-index", type=int, default=0, help="Current shard index in [0, num_shards).")
@@ -266,33 +267,36 @@ def main() -> None:
             score_prompts.append(full_text)
             score_meta.append((len(rows) - 1, prompt_ids, full_ids))
 
-    score_params = make_sampling_params(
-        temperature=0.0,
-        top_p=1.0,
-        max_tokens=1,
-        prompt_logprobs=1,
-    )
+    if args.skip_loglik_scoring:
+        for row in rows:
+            row["scored_token_count"] = None
+    else:
+        score_params = make_sampling_params(
+            temperature=0.0,
+            top_p=1.0,
+            max_tokens=1,
+            prompt_logprobs=1,
+        )
 
-    for start in range(0, len(score_prompts), args.score_batch_size):
-        end = min(start + args.score_batch_size, len(score_prompts))
-        scored_outputs = llm.generate(score_prompts[start:end], score_params)
-        for local_idx, scored in enumerate(scored_outputs):
-            row_idx, prompt_ids, full_ids = score_meta[start + local_idx]
-            response_start = len(prompt_ids)
-            response_ids = full_ids[response_start:]
-            prompt_logprobs = getattr(scored, "prompt_logprobs", None)
-            token_logprobs: list[float] = []
-            if prompt_logprobs is not None:
-                for pos in range(response_start, min(len(full_ids), len(prompt_logprobs))):
-                    lp = selected_logprob(prompt_logprobs[pos], full_ids[pos])
-                    if lp is not None and math.isfinite(lp):
-                        token_logprobs.append(lp)
-            total = sum(token_logprobs) if token_logprobs else None
-            rows[row_idx]["scored_token_count"] = len(token_logprobs)
-            rows[row_idx]["model_log_likelihood"] = total
-            rows[row_idx]["model_avg_log_likelihood"] = (
-                total / len(token_logprobs) if total is not None and token_logprobs else None
-            )
+        for start in range(0, len(score_prompts), args.score_batch_size):
+            end = min(start + args.score_batch_size, len(score_prompts))
+            scored_outputs = llm.generate(score_prompts[start:end], score_params)
+            for local_idx, scored in enumerate(scored_outputs):
+                row_idx, prompt_ids, full_ids = score_meta[start + local_idx]
+                response_start = len(prompt_ids)
+                prompt_logprobs = getattr(scored, "prompt_logprobs", None)
+                token_logprobs: list[float] = []
+                if prompt_logprobs is not None:
+                    for pos in range(response_start, min(len(full_ids), len(prompt_logprobs))):
+                        lp = selected_logprob(prompt_logprobs[pos], full_ids[pos])
+                        if lp is not None and math.isfinite(lp):
+                            token_logprobs.append(lp)
+                total = sum(token_logprobs) if token_logprobs else None
+                rows[row_idx]["scored_token_count"] = len(token_logprobs)
+                rows[row_idx]["model_log_likelihood"] = total
+                rows[row_idx]["model_avg_log_likelihood"] = (
+                    total / len(token_logprobs) if total is not None and token_logprobs else None
+                )
 
     prefix = f"{args.dataset_name}_qwen25_7b_temp{str(args.temperature).replace('.', 'p')}_n{args.n}"
     parquet_path = output_dir / f"{prefix}_loglik.parquet"
@@ -319,10 +323,13 @@ def main() -> None:
         "tensor_parallel_size": args.tensor_parallel_size,
         "gpu_memory_utilization": args.gpu_memory_utilization,
         "enforce_eager": args.enforce_eager,
+        "skip_loglik_scoring": args.skip_loglik_scoring,
         "parquet": str(parquet_path),
         "jsonl": str(jsonl_path),
         "mean_response_token_len": float(out_df["response_token_len"].mean()),
-        "mean_model_avg_log_likelihood": float(out_df["model_avg_log_likelihood"].mean()),
+        "mean_model_avg_log_likelihood": (
+            None if args.skip_loglik_scoring else float(out_df["model_avg_log_likelihood"].mean())
+        ),
         "accuracy": float(out_df["is_correct"].mean()),
         "num_correct": int(out_df["is_correct"].sum()),
         "num_unscored": int(out_df["model_avg_log_likelihood"].isna().sum()),

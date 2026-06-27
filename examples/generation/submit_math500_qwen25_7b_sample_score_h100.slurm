@@ -135,6 +135,9 @@ ARGS=(
 if [ "${DEDUPLICATE_BY_RAW_PROBLEM:-0}" = "1" ]; then
     ARGS+=(--deduplicate-by-raw-problem)
 fi
+if [ "${SKIP_LOGLIK_SCORING:-0}" = "1" ]; then
+    ARGS+=(--skip-loglik-scoring)
+fi
 if [ -n "${LIMIT:-}" ]; then
     ARGS+=(--limit "${LIMIT}")
 fi
