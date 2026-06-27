@@ -24,11 +24,13 @@ PREFIX_TOP_P=${PREFIX_TOP_P:-1.0}
 LIMIT=${LIMIT:-1000}
 SEED=${SEED:-42}
 
-NUM_SHARDS=${NUM_SHARDS:-8}
+NUM_SHARDS=${NUM_SHARDS:-4}
 GPUS_PER_SHARD=${GPUS_PER_SHARD:-1}
 TENSOR_PARALLEL_SIZE=${TENSOR_PARALLEL_SIZE:-1}
 GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.85}
 DTYPE=${DTYPE:-bfloat16}
+GPUS_PER_JOB=$((NUM_SHARDS * GPUS_PER_SHARD))
+CPUS_PER_JOB=${CPUS_PER_JOB:-$((GPUS_PER_JOB * 12))}
 
 SWEEP_NAME=${SWEEP_NAME:-hpf_dapo_leader_temp_sweep_$(date +%Y%m%d_%H%M%S)}
 OUTPUT_ROOT=${OUTPUT_ROOT:-/data/user/zhongal/VERL/outputs/${SWEEP_NAME}}
@@ -42,6 +44,8 @@ echo "Leader temps: ${TEMPS[*]}"
 echo "Follower temp: ${SUFFIX_TEMPERATURE}"
 echo "Limit: ${LIMIT}"
 echo "Prefixes x suffixes: ${NUM_PREFIXES} x ${NUM_SUFFIXES}"
+echo "GPUs per job: ${GPUS_PER_JOB}"
+echo "CPUs per job: ${CPUS_PER_JOB}"
 
 mkdir -p "${OUTPUT_ROOT}"
 
@@ -50,9 +54,10 @@ for temp in "${TEMPS[@]}"; do
     output_dir="${OUTPUT_ROOT}/leader_temp_${temp_tag}"
     job_id=$(
         sbatch --parsable \
+            --gres="gpu:${GPUS_PER_JOB}" \
+            --cpus-per-task="${CPUS_PER_JOB}" \
             --export=ALL,MODEL_PATH="${MODEL_PATH}",DATA_FILE="${DATA_FILE}",DATASET_NAME="${DATASET_NAME}",ROUND_INDEX="${ROUND_INDEX}",PROGRESSIVE_BLOCK_SIZE="${PROGRESSIVE_BLOCK_SIZE}",MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH}",NUM_PREFIXES="${NUM_PREFIXES}",NUM_SUFFIXES="${NUM_SUFFIXES}",PREFIX_TEMPERATURE="${temp}",PREFIX_TOP_P="${PREFIX_TOP_P}",SUFFIX_TEMPERATURE="${SUFFIX_TEMPERATURE}",SUFFIX_TOP_P="${SUFFIX_TOP_P}",LIMIT="${LIMIT}",SEED="${SEED}",NUM_SHARDS="${NUM_SHARDS}",GPUS_PER_SHARD="${GPUS_PER_SHARD}",TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE}",GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION}",DTYPE="${DTYPE}",OUTPUT_DIR="${output_dir}" \
             examples/generation/submit_hpf_progressive_dapo_rollout_h100.slurm
     )
     echo "leader_temp=${temp} job_id=${job_id} output_dir=${output_dir}"
 done
-
