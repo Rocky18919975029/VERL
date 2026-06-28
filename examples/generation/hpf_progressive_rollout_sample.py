@@ -292,7 +292,7 @@ def main() -> None:
         temperature=args.suffix_temperature,
         top_p=args.suffix_top_p,
         max_tokens=max(args.max_response_length - horizon, 1),
-        seed=args.seed + 1009,
+        seed=args.seed,
     )
 
     if suffix_prompts:
@@ -391,6 +391,8 @@ def main() -> None:
         "prefix_top_p": args.prefix_top_p,
         "suffix_temperature": args.suffix_temperature,
         "suffix_top_p": args.suffix_top_p,
+        "prefix_seed": args.seed,
+        "suffix_seed": args.seed,
         "num_shards": args.num_shards,
         "shard_index": args.shard_index,
         "mean_actual_prefix_tokens": None if prefix_df.empty else float(prefix_df["actual_prefix_tokens"].mean()),
