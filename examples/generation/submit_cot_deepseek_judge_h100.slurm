@@ -60,6 +60,7 @@ JUDGE_TEMPERATURE=${JUDGE_TEMPERATURE:-0.6}
 JUDGE_TOP_P=${JUDGE_TOP_P:-0.95}
 MAX_JUDGE_TOKENS=${MAX_JUDGE_TOKENS:-16384}
 JUDGE_BATCH_SIZE=${JUDGE_BATCH_SIZE:-32}
+COT_LABEL_AGGREGATION=${COT_LABEL_AGGREGATION:-majority}
 JUDGE_SCOPE=${JUDGE_SCOPE:-answer-correct}
 SEED=${SEED:-42}
 TOP_K=${TOP_K:-1,2,4,8,16,32,64,128,256,512,1024}
@@ -130,6 +131,7 @@ ARGS=(
     --judge-top-p "${JUDGE_TOP_P}"
     --max-judge-tokens "${MAX_JUDGE_TOKENS}"
     --judge-batch-size "${JUDGE_BATCH_SIZE}"
+    --cot-label-aggregation "${COT_LABEL_AGGREGATION}"
     --judge-scope "${JUDGE_SCOPE}"
     --top-k "${TOP_K}"
     --enforce-eager

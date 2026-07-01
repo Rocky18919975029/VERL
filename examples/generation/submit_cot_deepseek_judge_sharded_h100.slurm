@@ -62,6 +62,7 @@ JUDGE_TEMPERATURE=${JUDGE_TEMPERATURE:-0.6}
 JUDGE_TOP_P=${JUDGE_TOP_P:-0.95}
 MAX_JUDGE_TOKENS=${MAX_JUDGE_TOKENS:-16384}
 JUDGE_BATCH_SIZE=${JUDGE_BATCH_SIZE:-16}
+COT_LABEL_AGGREGATION=${COT_LABEL_AGGREGATION:-majority}
 JUDGE_SCOPE=${JUDGE_SCOPE:-answer-correct}
 SEED=${SEED:-42}
 TOP_K=${TOP_K:-1,2,4,8,16,32,64,128,256,512,1024}
@@ -138,6 +139,7 @@ COMMON_ARGS=(
     --judge-top-p "${JUDGE_TOP_P}"
     --max-judge-tokens "${MAX_JUDGE_TOKENS}"
     --judge-batch-size "${JUDGE_BATCH_SIZE}"
+    --cot-label-aggregation "${COT_LABEL_AGGREGATION}"
     --judge-scope "${JUDGE_SCOPE}"
     --top-k "${TOP_K}"
     --num-shards "${NUM_SHARDS}"
@@ -178,7 +180,7 @@ done
 python examples/generation/aggregate_cot_judge_results.py \
     --input-dir "${OUTPUT_DIR}" \
     --output-dir "${OUTPUT_DIR}/aggregate" \
+    --cot-label-aggregation "${COT_LABEL_AGGREGATION}" \
     --top-k "${TOP_K}"
 
 echo "All judge shards completed. Aggregate outputs are under ${OUTPUT_DIR}/aggregate"
-

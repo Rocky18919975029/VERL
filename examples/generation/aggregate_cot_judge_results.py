@@ -17,6 +17,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input-dir", required=True, help="Directory containing shard_*/cot_judge_rows.parquet.")
     parser.add_argument("--output-dir", default=None, help="Defaults to <input-dir>/aggregate.")
     parser.add_argument("--top-k", default="1,2,4,8,16,32,64,128,256,512,1024")
+    parser.add_argument(
+        "--cot-label-aggregation",
+        choices=["any", "all", "majority"],
+        default="majority",
+        help="Aggregation used for the row-level cot_correctness label.",
+    )
     return parser.parse_args()
 
 
@@ -126,8 +132,13 @@ def main() -> None:
     top_ks = sorted({int(k) for k in args.top_k.split(",") if k.strip()})
 
     df = load_rows(input_dir)
+    df["answer_correctness"] = df["is_correct"].astype(bool)
+    cot_label_col = f"cot_{args.cot_label_aggregation}_correct"
+    df["cot_correctness"] = df["answer_correctness"] & df[cot_label_col].astype(bool)
+    df["cot_correctness_aggregation"] = args.cot_label_aggregation
     per_problem, summary = summarize(df, top_ks)
     summary["input_dir"] = str(input_dir)
+    summary["cot_label_aggregation"] = args.cot_label_aggregation
 
     rows_path = output_dir / "cot_judge_rows.parquet"
     per_problem_path = output_dir / "cot_judge_per_problem.csv"
@@ -144,4 +155,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

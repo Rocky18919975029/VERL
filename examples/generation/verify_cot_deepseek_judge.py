@@ -85,6 +85,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--judge-top-p", type=float, default=0.95)
     parser.add_argument("--max-judge-tokens", type=int, default=16384)
     parser.add_argument("--judge-batch-size", type=int, default=32)
+    parser.add_argument(
+        "--cot-label-aggregation",
+        choices=["any", "all", "majority"],
+        default="majority",
+        help="Aggregation used for the row-level cot_correctness label.",
+    )
     parser.add_argument("--top-k", default="1,2,4,8,16,32,64,128,256,512,1024")
     parser.add_argument(
         "--judge-scope",
@@ -408,6 +414,10 @@ def main() -> None:
         merged.update(judge_results.get(row_id, default_result))
         result_rows.append(merged)
     result_df = pd.DataFrame(result_rows)
+    result_df["answer_correctness"] = result_df["is_correct"].astype(bool)
+    cot_label_col = f"cot_{args.cot_label_aggregation}_correct"
+    result_df["cot_correctness"] = result_df["answer_correctness"] & result_df[cot_label_col].astype(bool)
+    result_df["cot_correctness_aggregation"] = args.cot_label_aggregation
 
     per_problem, summary = summarize(result_df, top_ks)
     summary.update(
@@ -423,6 +433,7 @@ def main() -> None:
             "judge_temperature": args.judge_temperature,
             "judge_top_p": args.judge_top_p,
             "max_judge_tokens": args.max_judge_tokens,
+            "cot_label_aggregation": args.cot_label_aggregation,
         }
     )
 
