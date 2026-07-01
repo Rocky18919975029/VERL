@@ -58,7 +58,7 @@ DTYPE=${DTYPE:-bfloat16}
 JUDGE_ATTEMPTS=${JUDGE_ATTEMPTS:-3}
 JUDGE_TEMPERATURE=${JUDGE_TEMPERATURE:-0.6}
 JUDGE_TOP_P=${JUDGE_TOP_P:-0.95}
-MAX_JUDGE_TOKENS=${MAX_JUDGE_TOKENS:-4096}
+MAX_JUDGE_TOKENS=${MAX_JUDGE_TOKENS:-16384}
 JUDGE_BATCH_SIZE=${JUDGE_BATCH_SIZE:-32}
 JUDGE_SCOPE=${JUDGE_SCOPE:-answer-correct}
 SEED=${SEED:-42}
@@ -125,4 +125,3 @@ python examples/generation/verify_cot_deepseek_judge.py \
     --judge-scope "${JUDGE_SCOPE}" \
     --top-k "${TOP_K}" \
     --enforce-eager
-

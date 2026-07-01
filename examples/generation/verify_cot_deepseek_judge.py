@@ -59,7 +59,7 @@ Let's think step by step and output your final judgment within \\boxed{{}}
 """
 
 
-BOXED_RE = re.compile(r"\\boxed\s*\{\s*(yes|no)\s*\}", re.IGNORECASE)
+BOXED_RE = re.compile(r"\\boxed\s*\{\s*(?:\\text\s*\{\s*)?(yes|no)\s*\}?\s*\}", re.IGNORECASE)
 ISSUE_TYPES = {
     "calculation_error": re.compile(r"calculation error", re.IGNORECASE),
     "logical_error": re.compile(r"logical error", re.IGNORECASE),
@@ -81,7 +81,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--judge-attempts", type=int, default=3)
     parser.add_argument("--judge-temperature", type=float, default=0.6)
     parser.add_argument("--judge-top-p", type=float, default=0.95)
-    parser.add_argument("--max-judge-tokens", type=int, default=4096)
+    parser.add_argument("--max-judge-tokens", type=int, default=16384)
     parser.add_argument("--judge-batch-size", type=int, default=32)
     parser.add_argument("--top-k", default="1,2,4,8,16,32,64,128,256,512,1024")
     parser.add_argument(
