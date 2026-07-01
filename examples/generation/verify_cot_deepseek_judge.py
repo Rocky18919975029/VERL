@@ -18,6 +18,7 @@ from typing import Any
 
 import pandas as pd
 from transformers import AutoTokenizer
+from tqdm.auto import tqdm
 from vllm import LLM, SamplingParams
 
 
@@ -339,7 +340,14 @@ def main() -> None:
         f"judge_rows={len(prompts)} attempts={args.judge_attempts} batches={total_batches}",
         flush=True,
     )
-    for batch_idx, start in enumerate(range(0, len(prompts), args.judge_batch_size), start=1):
+    batch_starts = list(range(0, len(prompts), args.judge_batch_size))
+    progress_bar = tqdm(
+        enumerate(batch_starts, start=1),
+        total=total_batches,
+        desc=f"CoT judge shard {args.shard_index}/{args.num_shards}",
+        dynamic_ncols=True,
+    )
+    for batch_idx, start in progress_bar:
         end = min(start + args.judge_batch_size, len(prompts))
         batch_start = time.perf_counter()
         print(
@@ -371,6 +379,11 @@ def main() -> None:
         batch_elapsed = time.perf_counter() - batch_start
         avg_batch = elapsed / batch_idx
         remaining = avg_batch * (total_batches - batch_idx)
+        progress_bar.set_postfix(
+            rows=f"{end}/{len(prompts)}",
+            batch_s=f"{batch_elapsed:.1f}",
+            eta_s=f"{remaining:.1f}",
+        )
         print(
             f"[cot-judge] shard={args.shard_index}/{args.num_shards} "
             f"batch={batch_idx}/{total_batches} rows_done={end}/{len(prompts)} "
