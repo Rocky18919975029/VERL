@@ -95,8 +95,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--judge-scope",
         choices=["answer-correct", "all"],
-        default="answer-correct",
-        help="Judge only answer-correct responses by default, matching CoT-Pass@K's D count efficiently.",
+        default="all",
+        help="Judge all responses, or only answer-correct responses for cheaper CoT-Pass@K estimation.",
     )
     parser.add_argument("--limit-problems", type=int, default=None, help="Keep only the first N problems before judging.")
     parser.add_argument("--limit-rows", type=int, default=None, help="Debug limit after filtering.")
@@ -416,7 +416,7 @@ def main() -> None:
     result_df = pd.DataFrame(result_rows)
     result_df["answer_correctness"] = result_df["is_correct"].astype(bool)
     cot_label_col = f"cot_{args.cot_label_aggregation}_correct"
-    result_df["cot_correctness"] = result_df["answer_correctness"] & result_df[cot_label_col].astype(bool)
+    result_df["cot_correctness"] = result_df[cot_label_col].astype(bool)
     result_df["cot_correctness_aggregation"] = args.cot_label_aggregation
 
     per_problem, summary = summarize(result_df, top_ks)

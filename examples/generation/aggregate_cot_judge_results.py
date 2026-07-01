@@ -134,7 +134,7 @@ def main() -> None:
     df = load_rows(input_dir)
     df["answer_correctness"] = df["is_correct"].astype(bool)
     cot_label_col = f"cot_{args.cot_label_aggregation}_correct"
-    df["cot_correctness"] = df["answer_correctness"] & df[cot_label_col].astype(bool)
+    df["cot_correctness"] = df[cot_label_col].astype(bool)
     df["cot_correctness_aggregation"] = args.cot_label_aggregation
     per_problem, summary = summarize(df, top_ks)
     summary["input_dir"] = str(input_dir)
