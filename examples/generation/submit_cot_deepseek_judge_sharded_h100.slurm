@@ -68,6 +68,7 @@ SEED=${SEED:-42}
 TOP_K=${TOP_K:-1,2,4,8,16,32,64,128,256,512,1024}
 LIMIT_PROBLEMS=${LIMIT_PROBLEMS:-}
 LIMIT_ROWS=${LIMIT_ROWS:-}
+RETRY_PARSE_FAILURES_FROM=${RETRY_PARSE_FAILURES_FROM:-}
 
 if [ "${TENSOR_PARALLEL_SIZE}" -ne "${GPUS_PER_SHARD}" ]; then
     echo "TENSOR_PARALLEL_SIZE must match GPUS_PER_SHARD for this launcher." >&2
@@ -126,6 +127,7 @@ echo "Judge attempts: ${JUDGE_ATTEMPTS}"
 echo "Judge scope: ${JUDGE_SCOPE}"
 echo "Limit problems: ${LIMIT_PROBLEMS:-none}"
 echo "Limit rows: ${LIMIT_ROWS:-none}"
+echo "Retry parse failures from: ${RETRY_PARSE_FAILURES_FROM:-none}"
 
 COMMON_ARGS=(
     --input-dir "${INPUT_DIR}"
@@ -150,6 +152,9 @@ if [ -n "${LIMIT_PROBLEMS}" ]; then
 fi
 if [ -n "${LIMIT_ROWS}" ]; then
     COMMON_ARGS+=(--limit-rows "${LIMIT_ROWS}")
+fi
+if [ -n "${RETRY_PARSE_FAILURES_FROM}" ]; then
+    COMMON_ARGS+=(--retry-parse-failures-from "${RETRY_PARSE_FAILURES_FROM}")
 fi
 
 pids=()
@@ -177,10 +182,23 @@ for pid in "${pids[@]}"; do
     wait "${pid}"
 done
 
-python examples/generation/aggregate_cot_judge_results.py \
-    --input-dir "${OUTPUT_DIR}" \
-    --output-dir "${OUTPUT_DIR}/aggregate" \
-    --cot-label-aggregation "${COT_LABEL_AGGREGATION}" \
+AGGREGATE_ARGS=(
+    --input-dir "${OUTPUT_DIR}"
+    --output-dir "${OUTPUT_DIR}/aggregate"
+    --cot-label-aggregation "${COT_LABEL_AGGREGATION}"
     --top-k "${TOP_K}"
+)
+if [ -n "${RETRY_PARSE_FAILURES_FROM}" ]; then
+    if [ -f "${RETRY_PARSE_FAILURES_FROM}/aggregate/cot_judge_rows.parquet" ]; then
+        AGGREGATE_ARGS+=(--base-rows "${RETRY_PARSE_FAILURES_FROM}/aggregate/cot_judge_rows.parquet")
+    elif [ -f "${RETRY_PARSE_FAILURES_FROM}/cot_judge_rows.parquet" ]; then
+        AGGREGATE_ARGS+=(--base-rows "${RETRY_PARSE_FAILURES_FROM}/cot_judge_rows.parquet")
+    else
+        echo "Could not find base cot_judge_rows.parquet under RETRY_PARSE_FAILURES_FROM=${RETRY_PARSE_FAILURES_FROM}" >&2
+        exit 1
+    fi
+fi
+
+python examples/generation/aggregate_cot_judge_results.py "${AGGREGATE_ARGS[@]}"
 
 echo "All judge shards completed. Aggregate outputs are under ${OUTPUT_DIR}/aggregate"

@@ -102,6 +102,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit-rows", type=int, default=None, help="Debug limit after filtering.")
     parser.add_argument("--num-shards", type=int, default=1)
     parser.add_argument("--shard-index", type=int, default=0)
+    parser.add_argument(
+        "--retry-parse-failures-from",
+        default=None,
+        help=(
+            "Existing CoT judge output directory. When set, only rows with any failed "
+            "judge parse attempt are re-judged; prompts are unchanged."
+        ),
+    )
     parser.add_argument("--enforce-eager", action=argparse.BooleanOptionalAction, default=True)
     return parser.parse_args()
 
@@ -157,6 +165,48 @@ def load_trajectories(input_dir: Path) -> pd.DataFrame:
 
     df["is_correct"] = df["is_correct"].astype(bool)
     df["row_id"] = range(len(df))
+    return df
+
+
+def load_existing_judge_rows(judge_dir: Path) -> pd.DataFrame:
+    candidates = [
+        judge_dir / "aggregate" / "cot_judge_rows.parquet",
+        judge_dir / "cot_judge_rows.parquet",
+    ]
+    paths = [path for path in candidates if path.is_file()]
+    if not paths:
+        paths = sorted(judge_dir.glob("shard_*/cot_judge_rows.parquet"))
+    if not paths:
+        raise FileNotFoundError(f"No cot_judge_rows.parquet files found under {judge_dir}")
+
+    frames = []
+    for path in paths:
+        frame = pd.read_parquet(path)
+        frame["retry_source_file"] = str(path)
+        frames.append(frame)
+    df = pd.concat(frames, ignore_index=True)
+
+    required = {"problem_index", "sample_index", "response", "is_correct", "cot_judge_parse_all_ok"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"Retry source is missing required columns: {sorted(missing)}")
+
+    if "judge_question" not in df.columns:
+        if "raw_problem" in df.columns and df["raw_problem"].notna().any():
+            df["judge_question"] = df["raw_problem"].astype(str)
+        elif "prompt" in df.columns:
+            df["judge_question"] = df["prompt"].astype(str)
+        else:
+            raise ValueError("Retry source needs judge_question, raw_problem, or prompt column.")
+    if "problem_key" not in df.columns:
+        if "raw_problem" in df.columns and df["raw_problem"].notna().any():
+            df["problem_key"] = df["raw_problem"].astype(str)
+        else:
+            df["problem_key"] = df["problem_index"].astype(str)
+    if "row_id" not in df.columns:
+        df["row_id"] = range(len(df))
+
+    df["is_correct"] = df["is_correct"].astype(bool)
     return df
 
 
@@ -305,22 +355,37 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     top_ks = sorted({int(k) for k in args.top_k.split(",") if k.strip()})
 
-    df = load_trajectories(input_dir)
-    if args.limit_problems is not None:
-        problem_keys = list(dict.fromkeys(df["problem_key"].tolist()))[: args.limit_problems]
-        df = df[df["problem_key"].isin(problem_keys)].copy()
     if args.num_shards < 1:
         raise ValueError(f"--num-shards must be >= 1, got {args.num_shards}")
     if not 0 <= args.shard_index < args.num_shards:
         raise ValueError(f"--shard-index must be in [0, {args.num_shards}), got {args.shard_index}")
-    df = df.iloc[args.shard_index :: args.num_shards].reset_index(drop=True)
-    df["row_id"] = range(len(df))
-    if args.judge_scope == "answer-correct":
-        judge_df = df[df["is_correct"]].copy()
-    else:
+
+    retry_source = Path(args.retry_parse_failures_from) if args.retry_parse_failures_from else None
+    if retry_source is not None:
+        df = load_existing_judge_rows(retry_source)
+        judged_mask = df["cot_judge_attempts"].fillna(0).astype(int) > 0 if "cot_judge_attempts" in df.columns else True
+        parse_failed_mask = ~df["cot_judge_parse_all_ok"].fillna(False).astype(bool)
+        df = df[judged_mask & parse_failed_mask].copy()
+        df = df.iloc[args.shard_index :: args.num_shards].reset_index(drop=True)
         judge_df = df.copy()
+    else:
+        df = load_trajectories(input_dir)
+        if args.limit_problems is not None:
+            problem_keys = list(dict.fromkeys(df["problem_key"].tolist()))[: args.limit_problems]
+            df = df[df["problem_key"].isin(problem_keys)].copy()
+        df = df.iloc[args.shard_index :: args.num_shards].reset_index(drop=True)
+        if args.judge_scope == "answer-correct":
+            judge_df = df[df["is_correct"]].copy()
+        else:
+            judge_df = df.copy()
     if args.limit_rows is not None:
         judge_df = judge_df.head(args.limit_rows).copy()
+        if retry_source is not None:
+            df = judge_df.copy()
+
+    df["_judge_internal_row_id"] = range(len(df))
+    internal_id_by_index = df["_judge_internal_row_id"].to_dict()
+    judge_df["_judge_internal_row_id"] = [internal_id_by_index[idx] for idx in judge_df.index]
 
     tokenizer = AutoTokenizer.from_pretrained(args.judge_model, local_files_only=True, trust_remote_code=True)
     llm = make_llm(args)
@@ -337,7 +402,7 @@ def main() -> None:
         render_judge_prompt(tokenizer, row["judge_question"], row["response"])
         for _, row in judge_df.iterrows()
     ]
-    row_ids = judge_df["row_id"].tolist()
+    row_ids = judge_df["_judge_internal_row_id"].tolist()
 
     total_batches = (len(prompts) + args.judge_batch_size - 1) // args.judge_batch_size if prompts else 0
     progress_start = time.perf_counter()
@@ -409,11 +474,12 @@ def main() -> None:
     }
     result_rows = []
     for _, row in df.iterrows():
-        row_id = int(row["row_id"])
+        row_id = int(row["_judge_internal_row_id"])
         merged = row.to_dict()
         merged.update(judge_results.get(row_id, default_result))
         result_rows.append(merged)
     result_df = pd.DataFrame(result_rows)
+    result_df = result_df.drop(columns=["_judge_internal_row_id"], errors="ignore")
     result_df["answer_correctness"] = result_df["is_correct"].astype(bool)
     cot_label_col = f"cot_{args.cot_label_aggregation}_correct"
     result_df["cot_correctness"] = result_df[cot_label_col].astype(bool)
@@ -434,6 +500,7 @@ def main() -> None:
             "judge_top_p": args.judge_top_p,
             "max_judge_tokens": args.max_judge_tokens,
             "cot_label_aggregation": args.cot_label_aggregation,
+            "retry_parse_failures_from": str(retry_source) if retry_source is not None else None,
         }
     )
 

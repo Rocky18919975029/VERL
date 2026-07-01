@@ -16,6 +16,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input-dir", required=True, help="Directory containing shard_*/cot_judge_rows.parquet.")
     parser.add_argument("--output-dir", default=None, help="Defaults to <input-dir>/aggregate.")
+    parser.add_argument(
+        "--base-rows",
+        default=None,
+        help="Optional existing aggregate cot_judge_rows.parquet to update with retry rows from --input-dir.",
+    )
     parser.add_argument("--top-k", default="1,2,4,8,16,32,64,128,256,512,1024")
     parser.add_argument(
         "--cot-label-aggregation",
@@ -61,6 +66,47 @@ def load_rows(input_dir: Path) -> pd.DataFrame:
         else:
             df["problem_key"] = df["problem_index"].astype(str)
     return df
+
+
+def load_single_rows(path: Path) -> pd.DataFrame:
+    if not path.is_file():
+        raise FileNotFoundError(f"Base row file not found: {path}")
+    df = pd.read_parquet(path)
+    if "judge_source_file" not in df.columns:
+        df["judge_source_file"] = str(path)
+    if "problem_key" not in df.columns:
+        if "raw_problem" in df.columns and df["raw_problem"].notna().any():
+            df["problem_key"] = df["raw_problem"].astype(str)
+        else:
+            df["problem_key"] = df["problem_index"].astype(str)
+    return df
+
+
+def merge_retry_rows(base_df: pd.DataFrame, retry_df: pd.DataFrame) -> pd.DataFrame:
+    key_cols = ["problem_key", "sample_index"]
+    missing = [col for col in key_cols if col not in base_df.columns or col not in retry_df.columns]
+    if missing:
+        raise ValueError(f"Cannot merge retry rows; missing key columns: {missing}")
+    if base_df.duplicated(key_cols).any():
+        raise ValueError("Base rows contain duplicate problem_key/sample_index keys.")
+    if retry_df.duplicated(key_cols).any():
+        retry_df = retry_df.drop_duplicates(key_cols, keep="last")
+
+    judge_cols = [
+        col
+        for col in retry_df.columns
+        if col.startswith("cot_") or col in {"judge_source_file", "retry_source_file"}
+    ]
+    merged = base_df.set_index(key_cols, drop=False).copy()
+    retry = retry_df.set_index(key_cols, drop=False)
+    missing_keys = retry.index.difference(merged.index)
+    if len(missing_keys):
+        raise ValueError(f"Retry rows contain {len(missing_keys)} keys not present in base rows.")
+    for col in judge_cols:
+        if col not in merged.columns:
+            merged[col] = None
+        merged.loc[retry.index, col] = retry[col]
+    return merged.reset_index(drop=True)
 
 
 def summarize(df: pd.DataFrame, top_ks: list[int]) -> tuple[pd.DataFrame, dict[str, Any]]:
@@ -131,7 +177,13 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     top_ks = sorted({int(k) for k in args.top_k.split(",") if k.strip()})
 
-    df = load_rows(input_dir)
+    retry_df: pd.DataFrame | None = None
+    if args.base_rows:
+        df = load_single_rows(Path(args.base_rows))
+        retry_df = load_rows(input_dir)
+        df = merge_retry_rows(df, retry_df)
+    else:
+        df = load_rows(input_dir)
     df["answer_correctness"] = df["is_correct"].astype(bool)
     cot_label_col = f"cot_{args.cot_label_aggregation}_correct"
     df["cot_correctness"] = df[cot_label_col].astype(bool)
@@ -139,6 +191,9 @@ def main() -> None:
     per_problem, summary = summarize(df, top_ks)
     summary["input_dir"] = str(input_dir)
     summary["cot_label_aggregation"] = args.cot_label_aggregation
+    if args.base_rows:
+        summary["base_rows"] = args.base_rows
+        summary["num_retry_rows"] = int(len(retry_df)) if retry_df is not None else 0
 
     rows_path = output_dir / "cot_judge_rows.parquet"
     per_problem_path = output_dir / "cot_judge_per_problem.csv"
