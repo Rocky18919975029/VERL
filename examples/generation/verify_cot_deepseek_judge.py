@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import time
 from math import comb
 from pathlib import Path
 from typing import Any
@@ -331,8 +332,21 @@ def main() -> None:
     ]
     row_ids = judge_df["row_id"].tolist()
 
-    for start in range(0, len(prompts), args.judge_batch_size):
+    total_batches = (len(prompts) + args.judge_batch_size - 1) // args.judge_batch_size if prompts else 0
+    progress_start = time.perf_counter()
+    print(
+        f"[cot-judge] shard={args.shard_index}/{args.num_shards} "
+        f"judge_rows={len(prompts)} attempts={args.judge_attempts} batches={total_batches}",
+        flush=True,
+    )
+    for batch_idx, start in enumerate(range(0, len(prompts), args.judge_batch_size), start=1):
         end = min(start + args.judge_batch_size, len(prompts))
+        batch_start = time.perf_counter()
+        print(
+            f"[cot-judge] shard={args.shard_index}/{args.num_shards} "
+            f"batch={batch_idx}/{total_batches} rows={start}-{end}/{len(prompts)} start",
+            flush=True,
+        )
         outputs = llm.generate(prompts[start:end], sampling_params)
         for local_idx, request_output in enumerate(outputs):
             row_id = int(row_ids[start + local_idx])
@@ -353,6 +367,17 @@ def main() -> None:
                 for key in ISSUE_TYPES:
                     result[f"cot_judge_{attempt}_{key}"] = item[key]
             judge_results[row_id] = result
+        elapsed = time.perf_counter() - progress_start
+        batch_elapsed = time.perf_counter() - batch_start
+        avg_batch = elapsed / batch_idx
+        remaining = avg_batch * (total_batches - batch_idx)
+        print(
+            f"[cot-judge] shard={args.shard_index}/{args.num_shards} "
+            f"batch={batch_idx}/{total_batches} rows_done={end}/{len(prompts)} "
+            f"batch_elapsed_s={batch_elapsed:.1f} elapsed_s={elapsed:.1f} "
+            f"eta_s={remaining:.1f}",
+            flush=True,
+        )
 
     default_result = {
         "cot_judge_yes_count": 0,
