@@ -92,6 +92,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--limit-problems", type=int, default=None, help="Keep only the first N problems before judging.")
     parser.add_argument("--limit-rows", type=int, default=None, help="Debug limit after filtering.")
+    parser.add_argument("--num-shards", type=int, default=1)
+    parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--enforce-eager", action=argparse.BooleanOptionalAction, default=True)
     return parser.parse_args()
 
@@ -299,6 +301,12 @@ def main() -> None:
     if args.limit_problems is not None:
         problem_keys = list(dict.fromkeys(df["problem_key"].tolist()))[: args.limit_problems]
         df = df[df["problem_key"].isin(problem_keys)].copy()
+    if args.num_shards < 1:
+        raise ValueError(f"--num-shards must be >= 1, got {args.num_shards}")
+    if not 0 <= args.shard_index < args.num_shards:
+        raise ValueError(f"--shard-index must be in [0, {args.num_shards}), got {args.shard_index}")
+    df = df.iloc[args.shard_index :: args.num_shards].reset_index(drop=True)
+    df["row_id"] = range(len(df))
     if args.judge_scope == "answer-correct":
         judge_df = df[df["is_correct"]].copy()
     else:
@@ -371,6 +379,8 @@ def main() -> None:
             "judge_scope": args.judge_scope,
             "limit_problems": args.limit_problems,
             "limit_rows": args.limit_rows,
+            "num_shards": args.num_shards,
+            "shard_index": args.shard_index,
             "judge_attempts": args.judge_attempts,
             "judge_temperature": args.judge_temperature,
             "judge_top_p": args.judge_top_p,
