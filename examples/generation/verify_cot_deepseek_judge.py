@@ -90,6 +90,7 @@ def parse_args() -> argparse.Namespace:
         default="answer-correct",
         help="Judge only answer-correct responses by default, matching CoT-Pass@K's D count efficiently.",
     )
+    parser.add_argument("--limit-problems", type=int, default=None, help="Keep only the first N problems before judging.")
     parser.add_argument("--limit-rows", type=int, default=None, help="Debug limit after filtering.")
     parser.add_argument("--enforce-eager", action=argparse.BooleanOptionalAction, default=True)
     return parser.parse_args()
@@ -295,6 +296,9 @@ def main() -> None:
     top_ks = sorted({int(k) for k in args.top_k.split(",") if k.strip()})
 
     df = load_trajectories(input_dir)
+    if args.limit_problems is not None:
+        problem_keys = list(dict.fromkeys(df["problem_key"].tolist()))[: args.limit_problems]
+        df = df[df["problem_key"].isin(problem_keys)].copy()
     if args.judge_scope == "answer-correct":
         judge_df = df[df["is_correct"]].copy()
     else:
@@ -365,6 +369,8 @@ def main() -> None:
             "input_dir": str(input_dir),
             "judge_model": args.judge_model,
             "judge_scope": args.judge_scope,
+            "limit_problems": args.limit_problems,
+            "limit_rows": args.limit_rows,
             "judge_attempts": args.judge_attempts,
             "judge_temperature": args.judge_temperature,
             "judge_top_p": args.judge_top_p,

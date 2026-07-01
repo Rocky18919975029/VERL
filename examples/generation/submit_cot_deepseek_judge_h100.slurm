@@ -63,6 +63,8 @@ JUDGE_BATCH_SIZE=${JUDGE_BATCH_SIZE:-32}
 JUDGE_SCOPE=${JUDGE_SCOPE:-answer-correct}
 SEED=${SEED:-42}
 TOP_K=${TOP_K:-1,2,4,8,16,32,64,128,256,512,1024}
+LIMIT_PROBLEMS=${LIMIT_PROBLEMS:-}
+LIMIT_ROWS=${LIMIT_ROWS:-}
 
 if [ ! -d "${INPUT_DIR}" ]; then
     echo "Input directory not found: ${INPUT_DIR}" >&2
@@ -76,7 +78,11 @@ fi
 unset ROCR_VISIBLE_DEVICES
 unset HIP_VISIBLE_DEVICES
 
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
+if [ -z "${CUDA_VISIBLE_DEVICES:-}" ]; then
+    export CUDA_VISIBLE_DEVICES=$(seq -s, 0 $((TENSOR_PARALLEL_SIZE - 1)))
+else
+    export CUDA_VISIBLE_DEVICES
+fi
 export TOKENIZERS_PARALLELISM=${TOKENIZERS_PARALLELISM:-false}
 export HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}
 export TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-1}
@@ -108,20 +114,31 @@ echo "Output dir: ${OUTPUT_DIR}"
 echo "Judge model: ${JUDGE_MODEL}"
 echo "Judge attempts: ${JUDGE_ATTEMPTS}"
 echo "Judge scope: ${JUDGE_SCOPE}"
+echo "Limit problems: ${LIMIT_PROBLEMS:-none}"
+echo "Limit rows: ${LIMIT_ROWS:-none}"
 
-python examples/generation/verify_cot_deepseek_judge.py \
-    --input-dir "${INPUT_DIR}" \
-    --output-dir "${OUTPUT_DIR}" \
-    --judge-model "${JUDGE_MODEL}" \
-    --tensor-parallel-size "${TENSOR_PARALLEL_SIZE}" \
-    --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}" \
-    --dtype "${DTYPE}" \
-    --seed "${SEED}" \
-    --judge-attempts "${JUDGE_ATTEMPTS}" \
-    --judge-temperature "${JUDGE_TEMPERATURE}" \
-    --judge-top-p "${JUDGE_TOP_P}" \
-    --max-judge-tokens "${MAX_JUDGE_TOKENS}" \
-    --judge-batch-size "${JUDGE_BATCH_SIZE}" \
-    --judge-scope "${JUDGE_SCOPE}" \
-    --top-k "${TOP_K}" \
+ARGS=(
+    --input-dir "${INPUT_DIR}"
+    --output-dir "${OUTPUT_DIR}"
+    --judge-model "${JUDGE_MODEL}"
+    --tensor-parallel-size "${TENSOR_PARALLEL_SIZE}"
+    --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}"
+    --dtype "${DTYPE}"
+    --seed "${SEED}"
+    --judge-attempts "${JUDGE_ATTEMPTS}"
+    --judge-temperature "${JUDGE_TEMPERATURE}"
+    --judge-top-p "${JUDGE_TOP_P}"
+    --max-judge-tokens "${MAX_JUDGE_TOKENS}"
+    --judge-batch-size "${JUDGE_BATCH_SIZE}"
+    --judge-scope "${JUDGE_SCOPE}"
+    --top-k "${TOP_K}"
     --enforce-eager
+)
+if [ -n "${LIMIT_PROBLEMS}" ]; then
+    ARGS+=(--limit-problems "${LIMIT_PROBLEMS}")
+fi
+if [ -n "${LIMIT_ROWS}" ]; then
+    ARGS+=(--limit-rows "${LIMIT_ROWS}")
+fi
+
+python examples/generation/verify_cot_deepseek_judge.py "${ARGS[@]}"
