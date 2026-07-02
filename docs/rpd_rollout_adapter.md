@@ -4,16 +4,37 @@ This note keeps the RPD computation as close as possible to the official
 `fengjujf/Reasoning-Path-Divergence` repository. VERL only provides an adapter
 that reshapes rollout parquet files into the official Step 4 input format.
 
-## One-command official pipeline
+## One-command official pipeline on an H100 node
 
-The preferred path is to run the wrapper below. It exports VERL rollout parquet
-files, temporarily points the official RPD repository's `config.py` at a
-run-specific output directory, runs the official Step 4 and Step 5 scripts, and
-then restores the original official `config.py`.
+The preferred path is to submit the Slurm launcher below. It requests one H100
+node, exports VERL rollout parquet files, temporarily points the official RPD
+repository's `config.py` at a run-specific output directory, runs the official
+Step 4 and Step 5 scripts, and then restores the original official `config.py`.
 
 ```bash
 cd /data/user/zhongal/VERL
 
+INPUT_DIR=outputs/dapo_rollout_blocksize_matrix_20260701_203658/tree/seed_42/block_64/leader_temp_1p0 \
+RPD_REPO=/data/user/zhongal/external/Reasoning-Path-Divergence \
+MODEL_PATH_INSTRUCT=/data/user/zhongal/.cache/Qwen3-14B \
+MODEL_PATH_EMBEDDING=/data/user/zhongal/.cache/Qwen3-Embedding-8B \
+RUN_NAME=rpd_tree_seed42_block64 \
+sbatch examples/generation/submit_official_rpd_pipeline_h100.slurm
+```
+
+For a very small smoke test:
+
+```bash
+INPUT_DIR=outputs/dapo_rollout_blocksize_matrix_20260701_203658/tree/seed_42/block_64/leader_temp_1p0 \
+RUN_NAME=rpd_smoke_tree_seed42_block64 \
+TEST_LIMIT=2 \
+sbatch examples/generation/submit_official_rpd_pipeline_h100.slurm
+```
+
+If already inside an interactive GPU allocation, the underlying wrapper can be
+run directly:
+
+```bash
 INPUT_DIR=outputs/dapo_rollout_blocksize_matrix_20260701_203658/tree/seed_42/block_64/leader_temp_1p0 \
 RPD_REPO=/data/user/zhongal/external/Reasoning-Path-Divergence \
 MODEL_PATH_INSTRUCT=/data/user/zhongal/.cache/Qwen3-14B \
