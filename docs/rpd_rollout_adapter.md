@@ -4,7 +4,61 @@ This note keeps the RPD computation as close as possible to the official
 `fengjujf/Reasoning-Path-Divergence` repository. VERL only provides an adapter
 that reshapes rollout parquet files into the official Step 4 input format.
 
-## 1. Export VERL rollouts
+## One-command official pipeline
+
+The preferred path is to run the wrapper below. It exports VERL rollout parquet
+files, temporarily points the official RPD repository's `config.py` at a
+run-specific output directory, runs the official Step 4 and Step 5 scripts, and
+then restores the original official `config.py`.
+
+```bash
+cd /data/user/zhongal/VERL
+
+INPUT_DIR=outputs/dapo_rollout_blocksize_matrix_20260701_203658/tree/seed_42/block_64/leader_temp_1p0 \
+RPD_REPO=/data/user/zhongal/external/Reasoning-Path-Divergence \
+MODEL_PATH_INSTRUCT=/data/user/zhongal/.cache/Qwen3-14B \
+MODEL_PATH_EMBEDDING=/data/user/zhongal/.cache/Qwen3-Embedding-8B \
+RUN_NAME=rpd_tree_seed42_block64 \
+bash examples/generation/run_official_rpd_pipeline.sh
+```
+
+The run writes a self-contained record under:
+
+```text
+outputs/rpd_official_runs/rpd_tree_seed42_block64/
+```
+
+Important files:
+
+```text
+processed/quality_filtered_data_00000.parquet
+processed/rpd_rollout_manifest.json
+processed/rpd_export_summary.json
+processed/summaries/*.json
+processed/05_distance_matrix.npz
+logs/01_export_rollouts.log
+logs/04_generate_summary.log
+logs/05_compute_matrix.log
+rpd_pipeline_config.json
+rpd_pipeline_outputs.json
+official_config.py.used
+```
+
+Optional controls:
+
+```bash
+RESPONSES_PER_PROBLEM=8      # cap responses per problem before RPD
+MIN_RESPONSES=2              # drop problems with too few responses
+TEST_LIMIT=10                # pass through to official config.TEST_LIMIT
+RUN_SUMMARY=0                # skip official Step 4 if summaries already exist
+RUN_MATRIX=0                 # skip official Step 5
+SKIP_EXPORT=1                # reuse existing processed parquet files
+OVERWRITE=1                  # reuse an existing RUN_DIR
+```
+
+## Manual path
+
+### 1. Export VERL rollouts
 
 ```bash
 cd /data/user/zhongal/VERL
@@ -67,4 +121,3 @@ q_<rpd_global_idx>_ids
 
 Use `rpd_rollout_manifest.json` to map `rpd_global_idx` back to VERL
 `problem_index`.
-
