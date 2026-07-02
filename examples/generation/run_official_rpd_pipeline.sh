@@ -54,6 +54,9 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-outputs/rpd_official_runs}"
 STAMP="${STAMP:-$(date +%Y%m%d_%H%M%S)}"
 RUN_NAME="${RUN_NAME:-rpd_$(basename "${INPUT_DIR:-rollouts}")_${STAMP}}"
 RUN_DIR="${RUN_DIR:-${OUTPUT_ROOT}/${RUN_NAME}}"
+if [[ "${RUN_DIR}" != /* ]]; then
+  RUN_DIR="${VERL_ROOT}/${RUN_DIR}"
+fi
 PROCESSED_DIR="${RUN_DIR}/processed"
 LOG_DIR="${RUN_DIR}/logs"
 RESPONSES_PER_PROBLEM="${RESPONSES_PER_PROBLEM:-}"
