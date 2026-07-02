@@ -19,6 +19,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--metric", action="append", default=None, help="Metric to plot. Defaults to acr,acc,pass_at_8.")
     parser.add_argument("--shade", choices=["std", "sem"], default="std", help="Seed variation band.")
     parser.add_argument("--title", default=None)
+    parser.add_argument("--fig-width", type=float, default=7.0)
+    parser.add_argument("--fig-height-per-panel", type=float, default=1.85)
     return parser.parse_args()
 
 
@@ -132,12 +134,47 @@ def summarize(root: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
     return per_seed, summary
 
 
-def plot(per_seed: pd.DataFrame, summary: pd.DataFrame, output_dir: Path, metrics: list[str], shade: str, title: str | None) -> Path | None:
+def configure_plot_style() -> None:
+    import matplotlib as mpl
+
+    mpl.rcParams.update(
+        {
+            "font.family": "serif",
+            "font.serif": ["Times New Roman", "Times", "DejaVu Serif"],
+            "font.size": 9,
+            "axes.labelsize": 9,
+            "axes.titlesize": 10,
+            "xtick.labelsize": 8,
+            "ytick.labelsize": 8,
+            "legend.fontsize": 8,
+            "axes.linewidth": 0.7,
+            "grid.linewidth": 0.45,
+            "lines.linewidth": 1.7,
+            "lines.markersize": 4.2,
+            "pdf.fonttype": 42,
+            "ps.fonttype": 42,
+            "savefig.bbox": "tight",
+            "savefig.pad_inches": 0.03,
+        }
+    )
+
+
+def plot(
+    per_seed: pd.DataFrame,
+    summary: pd.DataFrame,
+    output_dir: Path,
+    metrics: list[str],
+    shade: str,
+    title: str | None,
+    fig_width: float,
+    fig_height_per_panel: float,
+) -> Path | None:
     try:
         import matplotlib.pyplot as plt
     except Exception as exc:
         print(f"matplotlib unavailable; skipped plot: {exc}")
         return None
+    configure_plot_style()
 
     tree = summary[summary["kind"] == "tree"].copy()
     full = summary[summary["kind"] == "full"].copy()
@@ -147,51 +184,101 @@ def plot(per_seed: pd.DataFrame, summary: pd.DataFrame, output_dir: Path, metric
         print("No tree block sizes found; skipped plot.")
         return None
 
-    fig, axes = plt.subplots(len(metrics), 1, figsize=(8, 3.2 * len(metrics)), sharex=True)
+    fig_height = fig_height_per_panel * len(metrics) + 0.35
+    fig, axes = plt.subplots(
+        len(metrics),
+        1,
+        figsize=(fig_width, fig_height),
+        sharex=True,
+        gridspec_kw={"hspace": 0.08},
+    )
     if len(metrics) == 1:
         axes = [axes]
 
     labels = {"acr": "ACR", "acc": "Trajectory accuracy", "pass_at_8": "Pass@8"}
     x_min, x_max = min(blocks), max(blocks)
     x_pad = max(1, int((x_max - x_min) * 0.05))
+    tree_color = "#0072B2"
+    full_color = "#D55E00"
+    shade_alpha = 0.16
+
+    legend_handles = None
+    legend_labels = None
 
     for ax, metric in zip(axes, metrics):
         tree_metric = tree[tree["metric"] == metric].sort_values("block_size")
         x = tree_metric["block_size"].astype(float)
         y = tree_metric["value_mean"].astype(float)
         band = tree_metric[f"value_{shade}"].fillna(0.0).astype(float)
-        ax.plot(x, y, marker="o", label="tree rollout")
-        ax.fill_between(x, y - band, y + band, alpha=0.2, label=f"tree ± {shade}")
+        ax.plot(
+            x,
+            y,
+            marker="o",
+            color=tree_color,
+            markerfacecolor="white",
+            markeredgewidth=1.2,
+            label="Tree rollout",
+            zorder=3,
+        )
+        ax.fill_between(x, y - band, y + band, color=tree_color, alpha=shade_alpha, linewidth=0, label=f"Tree ± {shade}")
 
         full_metric = full[full["metric"] == metric]
         if not full_metric.empty:
             full_mean = float(full_metric["value_mean"].iloc[0])
             full_band = float(full_metric[f"value_{shade}"].fillna(0.0).iloc[0])
-            ax.axhline(full_mean, linestyle="--", color="tab:orange", label="full rollout")
+            ax.axhline(full_mean, linestyle=(0, (4, 2)), color=full_color, linewidth=1.5, label="Full rollout", zorder=2)
             ax.fill_between(
                 [x_min - x_pad, x_max + x_pad],
                 [full_mean - full_band, full_mean - full_band],
                 [full_mean + full_band, full_mean + full_band],
-                color="tab:orange",
-                alpha=0.15,
-                label=f"full ± {shade}",
+                color=full_color,
+                alpha=0.12,
+                linewidth=0,
+                label=f"Full ± {shade}",
             )
         ax.set_ylabel(labels.get(metric, metric))
-        ax.grid(True, alpha=0.3)
-        ax.legend(loc="best")
+        ax.grid(True, axis="y", color="#B0B0B0", alpha=0.35)
+        ax.grid(True, axis="x", color="#D0D0D0", alpha=0.2)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.spines["left"].set_color("#333333")
+        ax.spines["bottom"].set_color("#333333")
+        ax.tick_params(direction="out", width=0.7, length=3)
+        ax.margins(y=0.12)
+        if legend_handles is None:
+            legend_handles, legend_labels = ax.get_legend_handles_labels()
 
     axes[-1].set_xlabel("Tree leader block size")
+    axes[-1].set_xticks(blocks)
     axes[-1].set_xlim(x_min - x_pad, x_max + x_pad)
     if title:
-        fig.suptitle(title)
-    fig.tight_layout()
+        fig.suptitle(title, y=0.995, fontsize=10.5)
+    if legend_handles is not None and legend_labels is not None:
+        fig.legend(
+            legend_handles,
+            legend_labels,
+            loc="upper center",
+            bbox_to_anchor=(0.5, 0.975 if title else 1.0),
+            ncol=4,
+            frameon=False,
+            handlelength=2.4,
+            columnspacing=1.4,
+        )
+    top = 0.89 if title else 0.93
+    fig.tight_layout(rect=(0, 0, 1, top))
 
     plot_path = output_dir / "rollout_blocksize_metrics.png"
-    fig.savefig(plot_path, dpi=200)
+    fig.savefig(plot_path, dpi=300)
     pdf_path = output_dir / "rollout_blocksize_metrics.pdf"
     fig.savefig(pdf_path)
+    pretty_path = output_dir / "rollout_blocksize_metrics_neurips.png"
+    fig.savefig(pretty_path, dpi=300)
+    pretty_pdf_path = output_dir / "rollout_blocksize_metrics_neurips.pdf"
+    fig.savefig(pretty_pdf_path)
     print(f"Wrote plot to {plot_path}")
     print(f"Wrote PDF plot to {pdf_path}")
+    print(f"Wrote NeurIPS-style plot to {pretty_path}")
+    print(f"Wrote NeurIPS-style PDF plot to {pretty_pdf_path}")
     return plot_path
 
 
@@ -217,7 +304,7 @@ def main() -> None:
     print(f"Wrote per-seed metrics to {per_seed_path}")
     print(f"Wrote summary to {summary_path}")
     print(f"Wrote JSON summary to {json_path}")
-    plot(per_seed, summary, output_dir, metrics, args.shade, args.title)
+    plot(per_seed, summary, output_dir, metrics, args.shade, args.title, args.fig_width, args.fig_height_per_panel)
 
 
 if __name__ == "__main__":
