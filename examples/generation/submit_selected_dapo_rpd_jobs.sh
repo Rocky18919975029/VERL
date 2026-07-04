@@ -39,6 +39,7 @@ OVERWRITE=${OVERWRITE:-0}
 RPD_NUM_SHARDS=${RPD_NUM_SHARDS:-8}
 RPD_GPUS_PER_SHARD=${RPD_GPUS_PER_SHARD:-1}
 RPD_CPUS_PER_SHARD=${RPD_CPUS_PER_SHARD:-12}
+RPD_MEM_PER_SHARD=${RPD_MEM_PER_SHARD:-220G}
 RPD_OUTPUT_ROOT=${RPD_OUTPUT_ROOT:-outputs/rpd_official_runs/dapo_seed${SEED}_tree32_64_128_256_full025_10_sharded${RPD_NUM_SHARDS}}
 
 MANIFEST=${RPD_OUTPUT_ROOT}/submitted_rpd_jobs.tsv
@@ -98,6 +99,7 @@ submit_rpd_shard() {
         sbatch --parsable \
             --gres="gpu:${RPD_GPUS_PER_SHARD}" \
             --cpus-per-task="${RPD_CPUS_PER_SHARD}" \
+            --mem="${RPD_MEM_PER_SHARD}" \
             --export=ALL,INPUT_DIR="${input_dir}",RPD_REPO="${RPD_REPO}",MODEL_PATH_INSTRUCT="${MODEL_PATH_INSTRUCT}",MODEL_PATH_EMBEDDING="${MODEL_PATH_EMBEDDING}",OUTPUT_ROOT="${RPD_OUTPUT_ROOT}",RUN_NAME="${shard_run_name}",TEST_LIMIT="${TEST_LIMIT}",RESPONSES_PER_PROBLEM="${RESPONSES_PER_PROBLEM}",MIN_RESPONSES="${MIN_RESPONSES}",MAX_ROWS_PER_FILE="${MAX_ROWS_PER_FILE}",EXPORT_NUM_SHARDS="${RPD_NUM_SHARDS}",EXPORT_SHARD_INDEX="${shard_index}",OVERWRITE="${OVERWRITE}" \
             examples/generation/submit_official_rpd_pipeline_h100.slurm
     )
@@ -126,6 +128,7 @@ echo "Run full jobs: ${RUN_FULL}"
 echo "RPD shards per setting: ${RPD_NUM_SHARDS}"
 echo "RPD GPUs per shard: ${RPD_GPUS_PER_SHARD}"
 echo "RPD CPUs per shard: ${RPD_CPUS_PER_SHARD}"
+echo "RPD memory per shard: ${RPD_MEM_PER_SHARD}"
 echo "Rollout matrix root: ${ROLLOUT_MATRIX_ROOT}"
 echo "RPD output root: ${RPD_OUTPUT_ROOT}"
 echo "TEST_LIMIT: ${TEST_LIMIT}"
