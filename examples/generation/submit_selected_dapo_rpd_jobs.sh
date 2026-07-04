@@ -38,8 +38,9 @@ MAX_ROWS_PER_FILE=${MAX_ROWS_PER_FILE:-10000}
 OVERWRITE=${OVERWRITE:-0}
 RPD_NUM_SHARDS=${RPD_NUM_SHARDS:-8}
 RPD_GPUS_PER_SHARD=${RPD_GPUS_PER_SHARD:-1}
-RPD_CPUS_PER_SHARD=${RPD_CPUS_PER_SHARD:-12}
-RPD_MEM_PER_SHARD=${RPD_MEM_PER_SHARD:-220G}
+RPD_GPUS_PER_JOB=${RPD_GPUS_PER_JOB:-$((RPD_NUM_SHARDS * RPD_GPUS_PER_SHARD))}
+RPD_CPUS_PER_JOB=${RPD_CPUS_PER_JOB:-96}
+RPD_MEM_PER_JOB=${RPD_MEM_PER_JOB:-0}
 RPD_OUTPUT_ROOT=${RPD_OUTPUT_ROOT:-outputs/rpd_official_runs/dapo_seed${SEED}_tree32_64_128_256_full025_10_sharded${RPD_NUM_SHARDS}}
 
 MANIFEST=${RPD_OUTPUT_ROOT}/submitted_rpd_jobs.tsv
@@ -81,39 +82,29 @@ full_input_dir() {
     esac
 }
 
-submit_rpd_shard() {
+submit_rpd() {
     local kind="$1"
     local setting="$2"
     local input_dir="$3"
     local run_name="$4"
-    local shard_index="$5"
 
     if [ ! -d "${input_dir}" ]; then
         echo "ERROR: missing rollout directory for ${setting}: ${input_dir}" >&2
         return 1
     fi
 
-    local shard_run_name="${run_name}_shard${shard_index}of${RPD_NUM_SHARDS}"
     local job_id
     job_id=$(
         sbatch --parsable \
-            --gres="gpu:${RPD_GPUS_PER_SHARD}" \
-            --cpus-per-task="${RPD_CPUS_PER_SHARD}" \
-            --mem="${RPD_MEM_PER_SHARD}" \
-            --export=ALL,INPUT_DIR="${input_dir}",RPD_REPO="${RPD_REPO}",MODEL_PATH_INSTRUCT="${MODEL_PATH_INSTRUCT}",MODEL_PATH_EMBEDDING="${MODEL_PATH_EMBEDDING}",OUTPUT_ROOT="${RPD_OUTPUT_ROOT}",RUN_NAME="${shard_run_name}",TEST_LIMIT="${TEST_LIMIT}",RESPONSES_PER_PROBLEM="${RESPONSES_PER_PROBLEM}",MIN_RESPONSES="${MIN_RESPONSES}",MAX_ROWS_PER_FILE="${MAX_ROWS_PER_FILE}",EXPORT_NUM_SHARDS="${RPD_NUM_SHARDS}",EXPORT_SHARD_INDEX="${shard_index}",OVERWRITE="${OVERWRITE}" \
-            examples/generation/submit_official_rpd_pipeline_h100.slurm
+            --gres="gpu:${RPD_GPUS_PER_JOB}" \
+            --cpus-per-task="${RPD_CPUS_PER_JOB}" \
+            --mem="${RPD_MEM_PER_JOB}" \
+            --export=ALL,INPUT_DIR="${input_dir}",RPD_REPO="${RPD_REPO}",MODEL_PATH_INSTRUCT="${MODEL_PATH_INSTRUCT}",MODEL_PATH_EMBEDDING="${MODEL_PATH_EMBEDDING}",OUTPUT_ROOT="${RPD_OUTPUT_ROOT}",RUN_NAME="${run_name}",TEST_LIMIT="${TEST_LIMIT}",RESPONSES_PER_PROBLEM="${RESPONSES_PER_PROBLEM}",MIN_RESPONSES="${MIN_RESPONSES}",MAX_ROWS_PER_FILE="${MAX_ROWS_PER_FILE}",RPD_NUM_SHARDS="${RPD_NUM_SHARDS}",RPD_GPUS_PER_SHARD="${RPD_GPUS_PER_SHARD}",OVERWRITE="${OVERWRITE}" \
+            examples/generation/submit_official_rpd_pipeline_sharded_h100.slurm
     )
-    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" "${kind}" "${setting}" "${shard_index}" "${RPD_NUM_SHARDS}" "${job_id}" "${shard_run_name}" "${input_dir}" | tee -a "${MANIFEST}"
-}
-
-submit_rpd() {
-    local kind="$1"
-    local setting="$2"
-    local input_dir="$3"
-    local run_name="$4"
     local shard
     for shard in $(seq 0 $((RPD_NUM_SHARDS - 1))); do
-        submit_rpd_shard "${kind}" "${setting}" "${input_dir}" "${run_name}" "${shard}"
+        printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" "${kind}" "${setting}" "${shard}" "${RPD_NUM_SHARDS}" "${job_id}" "${run_name}_shard${shard}of${RPD_NUM_SHARDS}" "${input_dir}" | tee -a "${MANIFEST}"
     done
 }
 
@@ -127,8 +118,9 @@ echo "Run tree jobs: ${RUN_TREE}"
 echo "Run full jobs: ${RUN_FULL}"
 echo "RPD shards per setting: ${RPD_NUM_SHARDS}"
 echo "RPD GPUs per shard: ${RPD_GPUS_PER_SHARD}"
-echo "RPD CPUs per shard: ${RPD_CPUS_PER_SHARD}"
-echo "RPD memory per shard: ${RPD_MEM_PER_SHARD}"
+echo "RPD GPUs per setting job: ${RPD_GPUS_PER_JOB}"
+echo "RPD CPUs per setting job: ${RPD_CPUS_PER_JOB}"
+echo "RPD memory per setting job: ${RPD_MEM_PER_JOB}"
 echo "Rollout matrix root: ${ROLLOUT_MATRIX_ROOT}"
 echo "RPD output root: ${RPD_OUTPUT_ROOT}"
 echo "TEST_LIMIT: ${TEST_LIMIT}"
