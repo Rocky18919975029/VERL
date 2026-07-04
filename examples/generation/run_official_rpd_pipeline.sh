@@ -30,6 +30,8 @@ Common optional env vars:
   RUN_NAME                  Run folder name. Default: rpd_<input-basename>_<timestamp>
   RESPONSES_PER_PROBLEM     Optional cap passed to the adapter. Default: unset
   MIN_RESPONSES             Drop problems with fewer exported responses. Default: 2
+  EXPORT_NUM_SHARDS         Split exported problems into this many shards. Default: 1
+  EXPORT_SHARD_INDEX        Export this 0-based shard index. Default: 0
   TEST_LIMIT                Official config TEST_LIMIT. Default: None
   RUN_SUMMARY               Run official 04_generate_summary.py. Default: 1
   RUN_MATRIX                Run official 05_compute_matrix.py. Default: 1
@@ -62,6 +64,8 @@ LOG_DIR="${RUN_DIR}/logs"
 RESPONSES_PER_PROBLEM="${RESPONSES_PER_PROBLEM:-}"
 MIN_RESPONSES="${MIN_RESPONSES:-2}"
 MAX_ROWS_PER_FILE="${MAX_ROWS_PER_FILE:-10000}"
+EXPORT_NUM_SHARDS="${EXPORT_NUM_SHARDS:-1}"
+EXPORT_SHARD_INDEX="${EXPORT_SHARD_INDEX:-0}"
 TEST_LIMIT="${TEST_LIMIT:-None}"
 RUN_SUMMARY="${RUN_SUMMARY:-1}"
 RUN_MATRIX="${RUN_MATRIX:-1}"
@@ -124,6 +128,8 @@ cat > "${RUN_DIR}/rpd_pipeline_config.json" <<EOF
   "responses_per_problem": "${RESPONSES_PER_PROBLEM}",
   "min_responses": ${MIN_RESPONSES},
   "max_rows_per_file": ${MAX_ROWS_PER_FILE},
+  "export_num_shards": ${EXPORT_NUM_SHARDS},
+  "export_shard_index": ${EXPORT_SHARD_INDEX},
   "test_limit": "${TEST_LIMIT}",
   "run_summary": "${RUN_SUMMARY}",
   "run_matrix": "${RUN_MATRIX}",
@@ -147,6 +153,8 @@ if [[ "${SKIP_EXPORT}" != "1" ]]; then
     --output-dir "${PROCESSED_DIR}"
     --min-responses "${MIN_RESPONSES}"
     --max-rows-per-file "${MAX_ROWS_PER_FILE}"
+    --num-shards "${EXPORT_NUM_SHARDS}"
+    --shard-index "${EXPORT_SHARD_INDEX}"
   )
   if [[ -n "${RESPONSES_PER_PROBLEM}" ]]; then
     ADAPTER_ARGS+=(--responses-per-problem "${RESPONSES_PER_PROBLEM}")

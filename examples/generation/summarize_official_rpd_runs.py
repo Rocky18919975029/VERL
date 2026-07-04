@@ -86,6 +86,8 @@ def summarize_run(row: dict[str, str], rpd_output_root: Path) -> tuple[dict[str,
                 {
                     "kind": row["kind"],
                     "setting": row["setting"],
+                    "shard_index": row.get("shard_index", "0"),
+                    "num_shards": row.get("num_shards", "1"),
                     "job_id": row["job_id"],
                     "run_name": run_name,
                     "rpd_global_idx": rpd_idx,
@@ -135,6 +137,8 @@ def summarize_run(row: dict[str, str], rpd_output_root: Path) -> tuple[dict[str,
     setting_summary = {
         "kind": row["kind"],
         "setting": row["setting"],
+        "shard_index": row.get("shard_index", "0"),
+        "num_shards": row.get("num_shards", "1"),
         "job_id": row["job_id"],
         "run_name": run_name,
         "input_dir": row["input_dir"],
@@ -157,6 +161,51 @@ def summarize_run(row: dict[str, str], rpd_output_root: Path) -> tuple[dict[str,
     return setting_summary, problem_rows
 
 
+def aggregate_setting_rows(run_df: pd.DataFrame, problem_df: pd.DataFrame) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    for (kind, setting), group in run_df.groupby(["kind", "setting"], dropna=False):
+        problem_group = problem_df[(problem_df["kind"] == kind) & (problem_df["setting"] == setting)]
+        total_summaries = int(problem_group["total_summaries"].sum()) if not problem_group.empty else 0
+        valid_summaries = int(problem_group["valid_summaries"].sum()) if not problem_group.empty else 0
+        matrix_problem_count = int((problem_group["num_pairwise_distances"] > 0).sum()) if not problem_group.empty else 0
+        num_pairwise_distances = int(problem_group["num_pairwise_distances"].sum()) if not problem_group.empty else 0
+
+        weighted_pairwise = np.nan
+        if num_pairwise_distances:
+            valid_pairs = problem_group[problem_group["num_pairwise_distances"] > 0]
+            weighted_pairwise = float(
+                np.average(valid_pairs["mean_pairwise_rpd"], weights=valid_pairs["num_pairwise_distances"])
+            )
+
+        per_problem_rpd = (
+            problem_group.loc[problem_group["num_pairwise_distances"] > 0, "mean_pairwise_rpd"].astype(float).to_numpy()
+            if not problem_group.empty
+            else np.array([])
+        )
+
+        rows.append(
+            {
+                "kind": kind,
+                "setting": setting,
+                "num_rpd_shards": int(len(group)),
+                "job_ids": ",".join(str(x) for x in group["job_id"].tolist()),
+                "run_names": ",".join(str(x) for x in group["run_name"].tolist()),
+                "num_exported_problems": int(group["num_exported_problems"].fillna(0).sum()),
+                "summary_json_files": int(group["summary_json_files"].fillna(0).sum()),
+                "total_summaries": total_summaries,
+                "valid_summaries": valid_summaries,
+                "valid_summary_frac": valid_summaries / total_summaries if total_summaries else np.nan,
+                "matrix_count": int(group["matrix_count"].fillna(0).sum()),
+                "matrix_problem_count": matrix_problem_count,
+                "mean_problem_rpd": float(np.mean(per_problem_rpd)) if per_problem_rpd.size else np.nan,
+                "median_problem_rpd": float(np.median(per_problem_rpd)) if per_problem_rpd.size else np.nan,
+                "mean_pairwise_rpd_over_pairs": weighted_pairwise,
+                "num_pairwise_distances": num_pairwise_distances,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def main() -> None:
     args = parse_args()
     manifest = Path(args.manifest)
@@ -164,28 +213,31 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    setting_rows: list[dict[str, Any]] = []
+    run_rows: list[dict[str, Any]] = []
     problem_rows: list[dict[str, Any]] = []
     for row in read_manifest(manifest):
-        setting_summary, per_problem = summarize_run(row, rpd_output_root)
-        setting_rows.append(setting_summary)
+        run_summary, per_problem = summarize_run(row, rpd_output_root)
+        run_rows.append(run_summary)
         problem_rows.extend(per_problem)
 
-    setting_df = pd.DataFrame(setting_rows)
+    run_df = pd.DataFrame(run_rows)
     problem_df = pd.DataFrame(problem_rows)
+    setting_df = aggregate_setting_rows(run_df, problem_df)
 
+    run_csv = output_dir / "official_rpd_run_summary.csv"
     setting_csv = output_dir / "official_rpd_setting_summary.csv"
     problem_csv = output_dir / "official_rpd_per_problem.csv"
     setting_json = output_dir / "official_rpd_setting_summary.json"
 
+    run_df.to_csv(run_csv, index=False)
     setting_df.to_csv(setting_csv, index=False)
     problem_df.to_csv(problem_csv, index=False)
-    setting_json.write_text(json.dumps(setting_rows, indent=2, ensure_ascii=False), encoding="utf-8")
+    setting_json.write_text(json.dumps(setting_df.to_dict(orient="records"), indent=2, ensure_ascii=False), encoding="utf-8")
 
     display_cols = [
         "kind",
         "setting",
-        "job_id",
+        "num_rpd_shards",
         "summary_json_files",
         "valid_summary_frac",
         "matrix_count",
@@ -193,6 +245,7 @@ def main() -> None:
         "mean_pairwise_rpd_over_pairs",
     ]
     print(setting_df[display_cols].to_string(index=False))
+    print(f"Wrote per-run summary to {run_csv}")
     print(f"Wrote setting summary to {setting_csv}")
     print(f"Wrote per-problem summary to {problem_csv}")
     print(f"Wrote JSON summary to {setting_json}")

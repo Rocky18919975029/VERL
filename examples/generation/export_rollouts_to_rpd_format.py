@@ -33,6 +33,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--correct-only", action="store_true", help="Export only answer-correct responses.")
     parser.add_argument("--min-responses", type=int, default=2, help="Drop problems with fewer responses after filtering.")
     parser.add_argument("--max-rows-per-file", type=int, default=10000)
+    parser.add_argument("--num-shards", type=int, default=1, help="Split exported problems into this many shards.")
+    parser.add_argument("--shard-index", type=int, default=0, help="Export only this 0-based shard index.")
     return parser.parse_args()
 
 
@@ -97,6 +99,10 @@ def main() -> None:
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    if args.num_shards < 1:
+        raise ValueError(f"--num-shards must be >= 1, got {args.num_shards}")
+    if not 0 <= args.shard_index < args.num_shards:
+        raise ValueError(f"--shard-index must be in [0, {args.num_shards}), got {args.shard_index}")
 
     paths = find_parquet_files(input_dir)
     if not paths:
@@ -144,6 +150,23 @@ def main() -> None:
     if not rows:
         raise ValueError("No problems left after filtering.")
 
+    total_exported_before_shard = len(rows)
+    if args.num_shards > 1:
+        selected = [
+            (row, item)
+            for original_idx, (row, item) in enumerate(zip(rows, manifest, strict=True))
+            if original_idx % args.num_shards == args.shard_index
+        ]
+        rows = [row for row, _ in selected]
+        manifest = [item for _, item in selected]
+        for local_idx, item in enumerate(manifest):
+            item["source_rpd_global_idx"] = item["rpd_global_idx"]
+            item["rpd_global_idx"] = local_idx
+            item["export_num_shards"] = args.num_shards
+            item["export_shard_index"] = args.shard_index
+    if not rows:
+        raise ValueError(f"No problems left for shard {args.shard_index}/{args.num_shards}.")
+
     for file_idx, start in enumerate(range(0, len(rows), args.max_rows_per_file)):
         chunk = pd.DataFrame(rows[start : start + args.max_rows_per_file])
         out_path = output_dir / f"{args.output_prefix}_{file_idx:05d}.parquet"
@@ -158,7 +181,10 @@ def main() -> None:
         "output_dir": str(output_dir),
         "num_source_files": len(paths),
         "num_source_rows": int(len(df)),
+        "num_exported_problems_before_shard": total_exported_before_shard,
         "num_exported_problems": len(rows),
+        "num_shards": args.num_shards,
+        "shard_index": args.shard_index,
         "min_responses": args.min_responses,
         "responses_per_problem": args.responses_per_problem,
         "correct_only": args.correct_only,
