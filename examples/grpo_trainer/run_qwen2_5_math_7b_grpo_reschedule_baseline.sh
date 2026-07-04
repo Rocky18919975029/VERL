@@ -125,6 +125,11 @@ REF=(
     actor_rollout_ref.ref.fsdp_config.param_offload=${REF_PARAM_OFFLOAD}
 )
 
+RAY=(
+    +ray_kwargs.ray_init.address=local
+    +ray_kwargs.ray_init._temp_dir="${RAY_TMP_DIR:-/tmp/ray_${USER:-unknown}_${RUN_NAME}}"
+)
+
 TRAINER_COMMON=(
     trainer.logger="${TRAINER_LOGGER}"
     trainer.project_name="${PROJECT_NAME}"
@@ -177,5 +182,6 @@ python3 -m verl.trainer.main_ppo \
     "${ACTOR[@]}" \
     "${ROLLOUT[@]}" \
     "${REF[@]}" \
+    "${RAY[@]}" \
     "${TRAINER[@]}" \
     "$@"
