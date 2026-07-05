@@ -87,6 +87,18 @@ def _sequence_scores(token_level_rewards: torch.Tensor) -> torch.Tensor:
     return token_level_rewards.sum(dim=-1).float()
 
 
+def _compute_horizon_masks(
+    batch: DataProto, round_index: int, progressive_block_size: int, max_response_length: int
+) -> tuple[int, torch.Tensor, torch.Tensor, torch.Tensor]:
+    response_mask = batch.batch["response_mask"]
+    response_len = response_mask.shape[-1]
+    horizon = min(int(round_index) * int(progressive_block_size), int(max_response_length), response_len)
+    prefix_lengths = torch.full((response_mask.shape[0],), horizon, dtype=torch.long, device=response_mask.device)
+    prefix_lengths = torch.minimum(prefix_lengths, response_mask.sum(dim=-1).long())
+    prefix_mask, suffix_mask = _make_prefix_suffix_masks(response_mask, prefix_lengths)
+    return horizon, prefix_lengths, prefix_mask, suffix_mask
+
+
 def _make_prefix_suffix_masks(
     response_mask: torch.Tensor, prefix_lengths: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -123,6 +135,152 @@ def _clone_for_masked_update(
     return update_batch
 
 
+def _masked_sequence_correction(
+    updated_log_probs: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    mask: torch.Tensor,
+    correction_clip: float,
+    metric_prefix: str,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    raw_delta = ((updated_log_probs - old_log_probs).to(mask.device) * mask).sum(dim=-1)
+    delta = raw_delta
+    clipped_upper = torch.zeros_like(raw_delta, dtype=torch.bool)
+    clipped_lower = torch.zeros_like(raw_delta, dtype=torch.bool)
+    if np.isfinite(correction_clip):
+        clipped_upper = raw_delta > correction_clip
+        clipped_lower = raw_delta < -correction_clip
+        delta = delta.clamp(min=-correction_clip, max=correction_clip)
+    correction = torch.exp(delta).detach()
+    return correction, {
+        f"{metric_prefix}_clip_upper_frac": float(clipped_upper.float().mean().item()),
+        f"{metric_prefix}_clip_lower_frac": float(clipped_lower.float().mean().item()),
+        f"{metric_prefix}_clip_frac": float((clipped_upper | clipped_lower).float().mean().item()),
+        f"{metric_prefix}_log_ratio_mean": float(delta.mean().item()),
+        f"{metric_prefix}_log_ratio_std": float(delta.std(unbiased=True).item()),
+        f"{metric_prefix}_ratio_mean": float(correction.mean().item()),
+        f"{metric_prefix}_ratio_max": float(correction.max().item()),
+        f"{metric_prefix}_ratio_min": float(correction.min().item()),
+    }
+
+
+def build_hpf_corrected_leader_batch(
+    batch: DataProto,
+    round_index: int,
+    progressive_block_size: int,
+    max_response_length: int,
+    leader_old_log_probs: torch.Tensor,
+    leader_post_follower_log_probs: torch.Tensor,
+    follower_old_log_probs: torch.Tensor,
+    follower_post_follower_log_probs: torch.Tensor,
+    correction_clip: float,
+) -> HPFMaskedBatch:
+    """Build the Algorithm-2 leader batch after the follower update.
+
+    The leader phase is prefix-level. We use prefix correction to map rollout
+    prefixes from the round-start leader to the post-follower leader, and suffix
+    correction to estimate the post-follower value of each sampled prefix.
+    """
+    if "response_mask" not in batch.batch:
+        raise ValueError("response_mask is required before building HPF masks")
+    if "token_level_rewards" not in batch.batch:
+        raise ValueError("token_level_rewards is required before building HPF masks")
+    if "uid" not in batch.non_tensor_batch:
+        raise ValueError("uid is required before building HPF advantages")
+
+    horizon, _, prefix_mask, suffix_mask = _compute_horizon_masks(
+        batch, round_index, progressive_block_size, max_response_length
+    )
+    device = prefix_mask.device
+    rewards = _sequence_scores(batch.batch["token_level_rewards"])
+    uid = batch.non_tensor_batch["uid"]
+    problem_ids = batch.non_tensor_batch.get("hpf_problem_uid", uid)
+    prefix_group_ids = batch.non_tensor_batch.get("hpf_prefix_uid")
+    has_tree_groups = prefix_group_ids is not None
+    if prefix_group_ids is None:
+        prefix_ids = np.arange(len(uid), dtype=object)
+        prefix_group_ids = _group_ids(uid, prefix_ids)
+
+    prefix_correction, prefix_metrics = _masked_sequence_correction(
+        updated_log_probs=leader_post_follower_log_probs,
+        old_log_probs=leader_old_log_probs,
+        mask=prefix_mask,
+        correction_clip=correction_clip,
+        metric_prefix="hpf/prefix_correction",
+    )
+    suffix_correction, suffix_metrics = _masked_sequence_correction(
+        updated_log_probs=follower_post_follower_log_probs,
+        old_log_probs=follower_old_log_probs,
+        mask=suffix_mask,
+        correction_clip=correction_clip,
+        metric_prefix="hpf/suffix_correction",
+    )
+
+    prefix_q = torch.zeros_like(rewards, dtype=torch.float32)
+    prefix_weight = torch.zeros_like(rewards, dtype=torch.float32)
+    unique_prefix_ids = np.unique(prefix_group_ids)
+    for prefix_group_id in unique_prefix_ids:
+        idx_np = np.nonzero(prefix_group_ids == prefix_group_id)[0]
+        idx = torch.as_tensor(idx_np, device=device, dtype=torch.long)
+        weights = suffix_correction[idx].float()
+        denom = weights.sum().clamp_min(1e-12)
+        q_value = (weights * rewards[idx].float()).sum() / denom
+        prefix_q[idx] = q_value
+        prefix_weight[idx] = prefix_correction[idx[0]].float()
+
+    baseline = torch.zeros_like(rewards, dtype=torch.float32)
+    for problem_id in np.unique(problem_ids):
+        problem_idx_np = np.nonzero(problem_ids == problem_id)[0]
+        problem_prefix_ids = prefix_group_ids[problem_idx_np]
+        unique_problem_prefix_ids = np.unique(problem_prefix_ids)
+        if len(unique_problem_prefix_ids) == 0:
+            continue
+        prefix_rows = []
+        q_values = []
+        c_values = []
+        for prefix_group_id in unique_problem_prefix_ids:
+            rows_np = problem_idx_np[np.nonzero(problem_prefix_ids == prefix_group_id)[0]]
+            rows = torch.as_tensor(rows_np, device=device, dtype=torch.long)
+            prefix_rows.append(rows)
+            q_values.append(prefix_q[rows[0]].float())
+            c_values.append(prefix_weight[rows[0]].float())
+        q_tensor = torch.stack(q_values)
+        c_tensor = torch.stack(c_values)
+        value = (c_tensor * q_tensor).sum() / c_tensor.sum().clamp_min(1e-12)
+        for rows in prefix_rows:
+            baseline[rows] = value
+
+    leader_adv = prefix_weight * (prefix_q - baseline)
+    leader_batch = _clone_for_masked_update(
+        batch,
+        prefix_mask,
+        leader_adv,
+        old_log_probs=leader_post_follower_log_probs,
+    )
+    suffix_nonempty = suffix_mask.sum(dim=-1) > 0
+    metrics = {
+        "hpf/enabled": 1.0,
+        "hpf/round_index": float(round_index),
+        "hpf/horizon_tokens": float(horizon),
+        "hpf/prefix_tokens_mean": float(prefix_mask.sum(dim=-1).float().mean().item()),
+        "hpf/suffix_tokens_mean": float(suffix_mask.sum(dim=-1).float().mean().item()),
+        "hpf/suffix_empty_frac": float((~suffix_nonempty).float().mean().item()),
+        "hpf/leader_adv_mean": float(leader_adv.mean().item()),
+        "hpf/leader_adv_std": float(leader_adv.std(unbiased=True).item()),
+        "hpf/leader_prefix_value_mean": float(prefix_q.mean().item()),
+        "hpf/leader_prefix_value_std": float(prefix_q.std(unbiased=True).item()),
+        "hpf/leader_baseline_mean": float(baseline.mean().item()),
+        "hpf/leader_baseline_std": float(baseline.std(unbiased=True).item()),
+        "hpf/minimal_grouping": 0.0 if has_tree_groups else 1.0,
+        "hpf/leader_prefix_groups": float(len(unique_prefix_ids)),
+    }
+    metrics.update(prefix_metrics)
+    metrics.update(suffix_metrics)
+    # Backward-compatible metric aliases for the existing dashboard.
+    for key, value in suffix_metrics.items():
+        metrics[key.replace("hpf/suffix_correction", "hpf/correction")] = value
+    return HPFMaskedBatch(batch=leader_batch, metrics=metrics, prefix_mask=prefix_mask, suffix_mask=suffix_mask)
+
+
 def build_hpf_masked_batches(
     batch: DataProto,
     round_index: int,
@@ -148,13 +306,10 @@ def build_hpf_masked_batches(
     if "uid" not in batch.non_tensor_batch:
         raise ValueError("uid is required before building HPF advantages")
 
-    response_mask = batch.batch["response_mask"]
-    device = response_mask.device
-    response_len = response_mask.shape[-1]
-    horizon = min(int(round_index) * int(progressive_block_size), int(max_response_length), response_len)
-    prefix_lengths = torch.full((response_mask.shape[0],), horizon, dtype=torch.long, device=device)
-    prefix_lengths = torch.minimum(prefix_lengths, response_mask.sum(dim=-1).long())
-    prefix_mask, suffix_mask = _make_prefix_suffix_masks(response_mask, prefix_lengths)
+    horizon, _, prefix_mask, suffix_mask = _compute_horizon_masks(
+        batch, round_index, progressive_block_size, max_response_length
+    )
+    device = prefix_mask.device
 
     rewards = _sequence_scores(batch.batch["token_level_rewards"])
     correct = (rewards > 0).float()

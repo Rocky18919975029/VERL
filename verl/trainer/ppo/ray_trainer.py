@@ -43,7 +43,7 @@ from verl.trainer.config import AlgoConfig
 from verl.trainer.distillation.losses import is_distillation_enabled
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
-from verl.trainer.ppo.hpf_utils import build_hpf_masked_batches
+from verl.trainer.ppo.hpf_utils import build_hpf_corrected_leader_batch, build_hpf_masked_batches
 from verl.trainer.ppo.metric_utils import (
     compute_data_metrics,
     compute_throughout_metrics,
@@ -1536,19 +1536,27 @@ class RayPPOTrainer:
             metrics.update(rename_dict(follower_metrics, "hpf/follower/"))
             metrics.update(follower_batch.metrics)
 
-        correction = torch.ones(len(leader_batch.batch), device=batch.batch["response_mask"].device)
+        follower_updated_log_prob = follower_old_log_prob
+        leader_updated_log_prob = leader_old_log_prob
         if follower_batch is not None and leader_batch.suffix_mask is not None:
             correction_start = time.perf_counter()
             follower_updated_log_prob, _ = self._compute_old_log_prob(batch, temperature=suffix_temperature)
-            correction, correction_metrics = self._compute_hpf_suffix_correction(
-                updated_log_probs=follower_updated_log_prob.batch["old_log_probs"],
-                old_log_probs=follower_old_log_prob.batch["old_log_probs"],
-                suffix_mask=leader_batch.suffix_mask,
+            leader_updated_log_prob, _ = self._compute_old_log_prob(batch, temperature=prefix_temperature)
+            leader_batch = build_hpf_corrected_leader_batch(
+                batch=batch,
+                round_index=hpf_round_index,
+                progressive_block_size=progressive_block_size,
+                max_response_length=max_response_length,
+                leader_old_log_probs=leader_old_log_prob.batch["old_log_probs"],
+                leader_post_follower_log_probs=leader_updated_log_prob.batch["old_log_probs"],
+                follower_old_log_probs=follower_old_log_prob.batch["old_log_probs"],
+                follower_post_follower_log_probs=follower_updated_log_prob.batch["old_log_probs"],
                 correction_clip=correction_clip,
             )
-            metrics.update(correction_metrics)
-            metrics["timing_s/hpf/suffix_correction_log_prob"] = float(time.perf_counter() - correction_start)
-            leader_batch.batch.batch["advantages"] = leader_batch.batch.batch["advantages"] * correction.unsqueeze(-1)
+            metrics.update(leader_batch.metrics)
+            metrics["timing_s/hpf/correction_log_prob"] = float(time.perf_counter() - correction_start)
+            metrics["timing_s/hpf/suffix_correction_log_prob"] = metrics["timing_s/hpf/correction_log_prob"]
+            metrics["timing_s/hpf/prefix_correction_log_prob"] = metrics["timing_s/hpf/correction_log_prob"]
 
         if suffix_kl_coef > 0 and leader_batch.suffix_mask is not None and follower_batch is not None:
             suffix_ref_log_prob = follower_updated_log_prob.batch["old_log_probs"]
