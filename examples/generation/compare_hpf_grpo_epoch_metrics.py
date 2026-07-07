@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare HPF and GRPO train/eval metrics over matching training steps."""
+"""Compare train/eval metrics over matching training steps."""
 
 from __future__ import annotations
 
@@ -19,16 +19,47 @@ EVAL_REWARD_KEY = "val-aux/aime_2024_dapo_boxed/reward/mean@1"
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--hpf-rollout-dir", required=True, type=Path)
-    parser.add_argument("--grpo-rollout-dir", required=True, type=Path)
-    parser.add_argument("--hpf-wandb-run", required=True, help="Full W&B path, e.g. entity/project/run_id.")
-    parser.add_argument("--grpo-wandb-run", required=True, help="Full W&B path, e.g. entity/project/run_id.")
+    parser.add_argument(
+        "--run",
+        action="append",
+        default=[],
+        help="Run spec as label::rollout_dir::wandb_run. Can be repeated.",
+    )
+    parser.add_argument("--hpf-rollout-dir", type=Path)
+    parser.add_argument("--grpo-rollout-dir", type=Path)
+    parser.add_argument("--hpf-wandb-run", help="Full W&B path, e.g. entity/project/run_id.")
+    parser.add_argument("--grpo-wandb-run", help="Full W&B path, e.g. entity/project/run_id.")
     parser.add_argument("--hpf-label", default="HPF 4x4")
     parser.add_argument("--grpo-label", default="GRPO n16")
     parser.add_argument("--max-step", type=int, default=33)
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/hpf_grpo_epoch_comparison"))
     parser.add_argument("--title", default="HPF vs GRPO baseline over the first epoch")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if not args.run:
+        missing = [
+            name
+            for name in ("hpf_rollout_dir", "grpo_rollout_dir", "hpf_wandb_run", "grpo_wandb_run")
+            if getattr(args, name) is None
+        ]
+        if missing:
+            parser.error("--run is required unless all legacy HPF/GRPO arguments are provided")
+    return args
+
+
+def parse_run_specs(args: argparse.Namespace) -> list[tuple[str, Path, str]]:
+    specs = []
+    if args.run:
+        for spec in args.run:
+            parts = spec.split("::", 2)
+            if len(parts) != 3:
+                raise ValueError(f"Invalid --run spec {spec!r}; expected label::rollout_dir::wandb_run")
+            label, rollout_dir, wandb_run = parts
+            specs.append((label, Path(rollout_dir), wandb_run))
+        return specs
+    return [
+        (args.hpf_label, args.hpf_rollout_dir, args.hpf_wandb_run),
+        (args.grpo_label, args.grpo_rollout_dir, args.grpo_wandb_run),
+    ]
 
 
 def response_text(row: dict[str, Any]) -> str:
@@ -102,7 +133,9 @@ def plot_comparison(df: pd.DataFrame, output_path: Path, title: str) -> None:
     import matplotlib.pyplot as plt
 
     plt.style.use("seaborn-v0_8-whitegrid")
-    colors = {"HPF 4x4": "#1f77b4", "GRPO n16": "#d62728"}
+    palette = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#ff7f0e", "#17becf", "#8c564b"]
+    labels = list(dict.fromkeys(df["run"].dropna().tolist()))
+    colors = {label: palette[i % len(palette)] for i, label in enumerate(labels)}
     metrics = [
         ("train_acc", "Train rollout accuracy"),
         ("eval_acc", "AIME24 eval accuracy"),
@@ -122,7 +155,7 @@ def plot_comparison(df: pd.DataFrame, output_path: Path, title: str) -> None:
     axes[1, 0].set_xlabel("Global step")
     axes[1, 1].set_xlabel("Global step")
     handles, labels = axes[0, 0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="upper center", ncol=2, frameon=False, bbox_to_anchor=(0.5, 0.965))
+    fig.legend(handles, labels, loc="upper center", ncol=min(max(len(labels), 1), 4), frameon=False, bbox_to_anchor=(0.5, 0.965))
     fig.suptitle(title, y=0.995, fontsize=15)
     fig.tight_layout(rect=(0, 0, 1, 0.94))
     fig.savefig(output_path, dpi=220)
@@ -132,19 +165,14 @@ def plot_comparison(df: pd.DataFrame, output_path: Path, title: str) -> None:
 def main() -> None:
     args = parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    run_specs = parse_run_specs(args)
 
     train = pd.concat(
-        [
-            summarize_rollout_dir(args.hpf_rollout_dir, args.hpf_label, args.max_step),
-            summarize_rollout_dir(args.grpo_rollout_dir, args.grpo_label, args.max_step),
-        ],
+        [summarize_rollout_dir(rollout_dir, label, args.max_step) for label, rollout_dir, _ in run_specs],
         ignore_index=True,
     )
     eval_df = pd.concat(
-        [
-            fetch_wandb_eval(args.hpf_wandb_run, args.hpf_label, args.max_step),
-            fetch_wandb_eval(args.grpo_wandb_run, args.grpo_label, args.max_step),
-        ],
+        [fetch_wandb_eval(wandb_run, label, args.max_step) for label, _, wandb_run in run_specs],
         ignore_index=True,
     )
     merged = train.merge(eval_df, on=["run", "step"], how="outer").sort_values(["step", "run"])
