@@ -43,7 +43,11 @@ from verl.trainer.config import AlgoConfig
 from verl.trainer.distillation.losses import is_distillation_enabled
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
-from verl.trainer.ppo.hpf_utils import build_hpf_corrected_leader_batch, build_hpf_masked_batches
+from verl.trainer.ppo.hpf_utils import (
+    build_hpf_corrected_leader_batch,
+    build_hpf_fresh_leader_batch,
+    build_hpf_masked_batches,
+)
 from verl.trainer.ppo.metric_utils import (
     compute_data_metrics,
     compute_throughout_metrics,
@@ -1449,7 +1453,13 @@ class RayPPOTrainer:
             "hpf/correction_ratio_min": float(correction.min().item()),
         }
 
-    def _update_actor_hpf_masked_grpo(self, batch: DataProto, hpf_round_index: int | None = None) -> DataProto:
+    def _update_actor_hpf_masked_grpo(
+        self,
+        batch: DataProto,
+        hpf_round_index: int | None = None,
+        prompt_batch: DataProto | None = None,
+        gen_batch: DataProto | None = None,
+    ) -> DataProto:
         hpf_update_start = time.perf_counter()
         hpf_config = self.config.algorithm.get("hpf_rlvr", {})
         progressive_block_size = int(hpf_config.get("progressive_block_size", 256))
@@ -1459,6 +1469,12 @@ class RayPPOTrainer:
         prefix_kl_coef = float(hpf_config.get("prefix_kl_coef", 0.0))
         suffix_kl_coef = float(hpf_config.get("suffix_kl_coef", 0.0))
         correction_clip = self._parse_hpf_float(hpf_config.get("correction_clip", float("inf")), float("inf"))
+        fresh_leader_tree_value = hpf_config.get("fresh_leader_tree", False)
+        fresh_leader_tree = (
+            fresh_leader_tree_value
+            if isinstance(fresh_leader_tree_value, bool)
+            else str(fresh_leader_tree_value).lower() in {"1", "true", "yes", "on"}
+        )
         std_normalize = bool(
             hpf_config.get("std_normalize", self.config.algorithm.get("norm_adv_by_std_in_grpo", True))
         )
@@ -1493,6 +1509,7 @@ class RayPPOTrainer:
         metrics["hpf/prefix_kl_coef"] = prefix_kl_coef
         metrics["hpf/suffix_kl_coef"] = suffix_kl_coef
         metrics["hpf/correction_clip"] = correction_clip
+        metrics["hpf/fresh_leader_tree_enabled"] = float(fresh_leader_tree)
         if follower_batch is not None:
             follower_mini_batch_size = (
                 self.config.actor_rollout_ref.actor.ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
@@ -1538,7 +1555,77 @@ class RayPPOTrainer:
 
         follower_updated_log_prob = follower_old_log_prob
         leader_updated_log_prob = leader_old_log_prob
-        if follower_batch is not None and leader_batch.suffix_mask is not None:
+        if fresh_leader_tree:
+            if prompt_batch is None or gen_batch is None:
+                raise ValueError("HPF fresh leader tree requires prompt_batch and gen_batch.")
+            fresh_start = time.perf_counter()
+            print(
+                "[HPF] fresh leader tree weight sync start "
+                f"step={self.global_steps}",
+                flush=True,
+            )
+            self.checkpoint_manager.update_weights(self.global_steps)
+            print(
+                "[HPF] fresh leader tree rollout start "
+                f"step={self.global_steps}",
+                flush=True,
+            )
+            fresh_gen_output, fresh_tree_metrics = self._generate_hpf_tree_sequences(
+                gen_batch, hpf_round_index=hpf_round_index
+            )
+            self.checkpoint_manager.sleep_replicas()
+            prefixed_fresh_metrics = {}
+            for key, value in fresh_tree_metrics.items():
+                if key.startswith("timing_s/hpf/tree_"):
+                    prefixed_fresh_metrics[key.replace("timing_s/hpf/tree_", "timing_s/hpf/fresh_leader_tree_")] = value
+                elif key.startswith("timing_s/hpf/"):
+                    prefixed_fresh_metrics[key.replace("timing_s/hpf/", "timing_s/hpf/fresh_leader_")] = value
+                elif key.startswith("hpf/tree_"):
+                    prefixed_fresh_metrics[key.replace("hpf/tree_", "hpf/fresh_leader_tree_")] = value
+                else:
+                    prefixed_fresh_metrics[f"hpf/fresh_leader/{key}"] = value
+            metrics.update(prefixed_fresh_metrics)
+            fresh_gen_output.meta_info.pop("timing", None)
+
+            fresh_batch = prompt_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+            fresh_batch = fresh_batch.union(fresh_gen_output)
+            if "response_mask" not in fresh_batch.batch:
+                fresh_batch.batch["response_mask"] = compute_response_mask(fresh_batch)
+            if self.config.trainer.balance_batch:
+                self._balance_batch(fresh_batch, metrics=metrics)
+            fresh_batch.meta_info["global_token_num"] = torch.sum(
+                fresh_batch.batch["attention_mask"], dim=-1
+            ).tolist()
+
+            fresh_reward_start = time.perf_counter()
+            if self.use_rm and "rm_scores" not in fresh_batch.batch:
+                fresh_batch_reward = self._compute_reward_colocate(fresh_batch)
+                fresh_batch = fresh_batch.union(fresh_batch_reward)
+            fresh_reward_tensor, fresh_reward_extra_infos_dict = extract_reward(fresh_batch)
+            fresh_batch.batch["token_level_scores"] = fresh_reward_tensor
+            if fresh_reward_extra_infos_dict:
+                fresh_batch.non_tensor_batch.update(
+                    {key: np.array(value) for key, value in fresh_reward_extra_infos_dict.items()}
+                )
+            fresh_batch.batch["token_level_rewards"] = fresh_batch.batch["token_level_scores"]
+            metrics["timing_s/hpf/fresh_leader_reward"] = float(time.perf_counter() - fresh_reward_start)
+
+            fresh_logprob_start = time.perf_counter()
+            leader_updated_log_prob, _ = self._compute_old_log_prob(fresh_batch, temperature=prefix_temperature)
+            follower_updated_log_prob, _ = self._compute_old_log_prob(fresh_batch, temperature=suffix_temperature)
+            metrics["timing_s/hpf/fresh_leader_role_old_log_prob"] = float(time.perf_counter() - fresh_logprob_start)
+            leader_batch = build_hpf_fresh_leader_batch(
+                batch=fresh_batch,
+                round_index=hpf_round_index,
+                progressive_block_size=progressive_block_size,
+                max_response_length=max_response_length,
+                epsilon=epsilon,
+                std_normalize=std_normalize,
+                leader_old_log_probs=leader_updated_log_prob.batch["old_log_probs"],
+            )
+            metrics.update(leader_batch.metrics)
+            metrics["timing_s/hpf/fresh_leader_total"] = float(time.perf_counter() - fresh_start)
+        elif follower_batch is not None and leader_batch.suffix_mask is not None:
             correction_start = time.perf_counter()
             follower_updated_log_prob, _ = self._compute_old_log_prob(batch, temperature=suffix_temperature)
             leader_updated_log_prob, _ = self._compute_old_log_prob(batch, temperature=prefix_temperature)
@@ -2019,6 +2106,7 @@ class RayPPOTrainer:
                     else:
                         del combined_gen_batch, combined_gen_output
                     # repeat to align with repeated responses in rollout
+                    prompt_batch_for_hpf = batch
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     batch = batch.union(gen_batch_output)
 
@@ -2188,7 +2276,10 @@ class RayPPOTrainer:
                         with marked_timer("update_actor", timing_raw, color="red"):
                             if self.config.algorithm.get("hpf_rlvr", {}).get("enable", False):
                                 actor_output = self._update_actor_hpf_masked_grpo(
-                                    batch, hpf_round_index=hpf_round_index
+                                    batch,
+                                    hpf_round_index=hpf_round_index,
+                                    prompt_batch=prompt_batch_for_hpf,
+                                    gen_batch=gen_batch,
                                 )
                             else:
                                 actor_output = self._update_actor(batch)

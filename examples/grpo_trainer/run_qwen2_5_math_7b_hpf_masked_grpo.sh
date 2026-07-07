@@ -19,6 +19,7 @@ HPF_HORIZON_UPDATE_INTERVAL_STEPS=${HPF_HORIZON_UPDATE_INTERVAL_STEPS:-1}
 HPF_PREFIX_KL_COEF=${HPF_PREFIX_KL_COEF:-0.001}
 HPF_SUFFIX_KL_COEF=${HPF_SUFFIX_KL_COEF:-0.001}
 HPF_CORRECTION_CLIP=${HPF_CORRECTION_CLIP:-5.0}
+HPF_FRESH_LEADER_TREE=${HPF_FRESH_LEADER_TREE:-False}
 HPF_PROGRESS_LOG_INTERVAL=${HPF_PROGRESS_LOG_INTERVAL:-1}
 HPF_TREE_ROLLOUT=${HPF_TREE_ROLLOUT:-False}
 HPF_TREE_NUM_PREFIXES=${HPF_TREE_NUM_PREFIXES:-4}
@@ -67,6 +68,7 @@ HPF_ARGS=(
     algorithm.hpf_rlvr.prefix_kl_coef="${HPF_PREFIX_KL_COEF}"
     algorithm.hpf_rlvr.suffix_kl_coef="${HPF_SUFFIX_KL_COEF}"
     algorithm.hpf_rlvr.correction_clip="${HPF_CORRECTION_CLIP}"
+    algorithm.hpf_rlvr.fresh_leader_tree="${HPF_FRESH_LEADER_TREE}"
     algorithm.hpf_rlvr.progress_log_interval="${HPF_PROGRESS_LOG_INTERVAL}"
     actor_rollout_ref.actor.loss_agg_mode="${HPF_LOSS_AGG_MODE}"
 )

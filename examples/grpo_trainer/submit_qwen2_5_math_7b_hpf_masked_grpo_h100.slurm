@@ -142,6 +142,7 @@ echo "HPF horizon update interval steps: ${HPF_HORIZON_UPDATE_INTERVAL_STEPS:-1}
 echo "HPF tree rollout: ${HPF_TREE_ROLLOUT:-False}"
 echo "HPF tree num prefixes: ${HPF_TREE_NUM_PREFIXES:-4}"
 echo "HPF tree num suffixes: ${HPF_TREE_NUM_SUFFIXES:-2}"
+echo "HPF fresh leader tree: ${HPF_FRESH_LEADER_TREE:-False}"
 
 ACTOR_PARAM_OFFLOAD=${ACTOR_PARAM_OFFLOAD:-True}
 ACTOR_OPTIMIZER_OFFLOAD=${ACTOR_OPTIMIZER_OFFLOAD:-True}

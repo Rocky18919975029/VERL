@@ -281,6 +281,96 @@ def build_hpf_corrected_leader_batch(
     return HPFMaskedBatch(batch=leader_batch, metrics=metrics, prefix_mask=prefix_mask, suffix_mask=suffix_mask)
 
 
+def build_hpf_fresh_leader_batch(
+    batch: DataProto,
+    round_index: int,
+    progressive_block_size: int,
+    max_response_length: int,
+    epsilon: float,
+    std_normalize: bool,
+    leader_old_log_probs: torch.Tensor,
+) -> HPFMaskedBatch:
+    """Build the Algorithm-3 leader batch from a fresh post-follower tree."""
+    if "response_mask" not in batch.batch:
+        raise ValueError("response_mask is required before building HPF masks")
+    if "token_level_rewards" not in batch.batch:
+        raise ValueError("token_level_rewards is required before building HPF masks")
+    if "uid" not in batch.non_tensor_batch:
+        raise ValueError("uid is required before building HPF advantages")
+
+    horizon, _, prefix_mask, suffix_mask = _compute_horizon_masks(
+        batch, round_index, progressive_block_size, max_response_length
+    )
+    device = prefix_mask.device
+    rewards = _sequence_scores(batch.batch["token_level_rewards"])
+    uid = batch.non_tensor_batch["uid"]
+    problem_ids = batch.non_tensor_batch.get("hpf_problem_uid", uid)
+    prefix_group_ids = batch.non_tensor_batch.get("hpf_prefix_uid")
+    has_tree_groups = prefix_group_ids is not None
+    if prefix_group_ids is None:
+        prefix_ids = np.arange(len(uid), dtype=object)
+        prefix_group_ids = _group_ids(uid, prefix_ids)
+
+    prefix_q = torch.zeros_like(rewards, dtype=torch.float32)
+    unique_prefix_ids = np.unique(prefix_group_ids)
+    for prefix_group_id in unique_prefix_ids:
+        idx_np = np.nonzero(prefix_group_ids == prefix_group_id)[0]
+        idx = torch.as_tensor(idx_np, device=device, dtype=torch.long)
+        prefix_q[idx] = rewards[idx].float().mean()
+
+    leader_adv = torch.zeros_like(rewards, dtype=torch.float32)
+    for problem_id in np.unique(problem_ids):
+        problem_idx_np = np.nonzero(problem_ids == problem_id)[0]
+        problem_prefix_ids = prefix_group_ids[problem_idx_np]
+        unique_problem_prefix_ids = np.unique(problem_prefix_ids)
+        if len(unique_problem_prefix_ids) <= 1:
+            continue
+
+        prefix_rows = []
+        q_values = []
+        for prefix_group_id in unique_problem_prefix_ids:
+            rows_np = problem_idx_np[np.nonzero(problem_prefix_ids == prefix_group_id)[0]]
+            rows = torch.as_tensor(rows_np, device=device, dtype=torch.long)
+            prefix_rows.append(rows)
+            q_values.append(prefix_q[rows[0]].float())
+
+        q_tensor = torch.stack(q_values)
+        centered = q_tensor - q_tensor.mean()
+        if std_normalize:
+            std = q_tensor.std(unbiased=True)
+            if torch.isfinite(std) and std > 0:
+                centered = centered / (std + epsilon)
+            else:
+                centered = torch.zeros_like(centered)
+
+        for rows, value in zip(prefix_rows, centered, strict=True):
+            leader_adv[rows] = value
+
+    suffix_nonempty = suffix_mask.sum(dim=-1) > 0
+    leader_batch = _clone_for_masked_update(
+        batch,
+        prefix_mask,
+        leader_adv,
+        old_log_probs=leader_old_log_probs,
+    )
+    metrics = {
+        "hpf/enabled": 1.0,
+        "hpf/fresh_leader_tree_enabled": 1.0,
+        "hpf/round_index": float(round_index),
+        "hpf/horizon_tokens": float(horizon),
+        "hpf/prefix_tokens_mean": float(prefix_mask.sum(dim=-1).float().mean().item()),
+        "hpf/suffix_tokens_mean": float(suffix_mask.sum(dim=-1).float().mean().item()),
+        "hpf/suffix_empty_frac": float((~suffix_nonempty).float().mean().item()),
+        "hpf/leader_adv_mean": float(leader_adv.mean().item()),
+        "hpf/leader_adv_std": float(leader_adv.std(unbiased=True).item()),
+        "hpf/leader_prefix_value_mean": float(prefix_q.mean().item()),
+        "hpf/leader_prefix_value_std": float(prefix_q.std(unbiased=True).item()),
+        "hpf/minimal_grouping": 0.0 if has_tree_groups else 1.0,
+        "hpf/leader_prefix_groups": float(len(unique_prefix_ids)),
+    }
+    return HPFMaskedBatch(batch=leader_batch, metrics=metrics, prefix_mask=prefix_mask, suffix_mask=suffix_mask)
+
+
 def build_hpf_masked_batches(
     batch: DataProto,
     round_index: int,
