@@ -68,7 +68,7 @@ HPF_ARGS=(
     algorithm.hpf_rlvr.prefix_kl_coef="${HPF_PREFIX_KL_COEF}"
     algorithm.hpf_rlvr.suffix_kl_coef="${HPF_SUFFIX_KL_COEF}"
     algorithm.hpf_rlvr.correction_clip="${HPF_CORRECTION_CLIP}"
-    algorithm.hpf_rlvr.fresh_leader_tree="${HPF_FRESH_LEADER_TREE}"
+    +algorithm.hpf_rlvr.fresh_leader_tree="${HPF_FRESH_LEADER_TREE}"
     algorithm.hpf_rlvr.progress_log_interval="${HPF_PROGRESS_LOG_INTERVAL}"
     actor_rollout_ref.actor.loss_agg_mode="${HPF_LOSS_AGG_MODE}"
 )
