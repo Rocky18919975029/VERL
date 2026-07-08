@@ -18,6 +18,7 @@ class HPFMaskedBatch:
     metrics: dict[str, float]
     prefix_mask: torch.Tensor | None = None
     suffix_mask: torch.Tensor | None = None
+    source_indices: np.ndarray | None = None
 
 
 def _normalize_group_scores(
@@ -81,6 +82,17 @@ def _normalize_repeated_prefix_scores(
 
 def _group_ids(*arrays: np.ndarray) -> np.ndarray:
     return np.array(["::".join(map(str, values)) for values in zip(*arrays, strict=True)], dtype=object)
+
+
+def _first_indices_per_group(group_ids: np.ndarray) -> np.ndarray:
+    seen = set()
+    indices = []
+    for idx, group_id in enumerate(group_ids):
+        if group_id in seen:
+            continue
+        seen.add(group_id)
+        indices.append(idx)
+    return np.asarray(indices, dtype=np.int64)
 
 
 def _sequence_scores(token_level_rewards: torch.Tensor) -> torch.Tensor:
@@ -347,11 +359,18 @@ def build_hpf_fresh_leader_batch(
             leader_adv[rows] = value
 
     suffix_nonempty = suffix_mask.sum(dim=-1) > 0
+    leader_indices_np = _first_indices_per_group(prefix_group_ids)
+    leader_indices = torch.as_tensor(leader_indices_np, device=device, dtype=torch.long)
+    dedup_batch = batch[leader_indices_np]
+    dedup_prefix_mask = prefix_mask[leader_indices]
+    dedup_suffix_mask = suffix_mask[leader_indices]
+    dedup_leader_adv = leader_adv[leader_indices]
+    dedup_leader_old_log_probs = leader_old_log_probs[leader_indices]
     leader_batch = _clone_for_masked_update(
-        batch,
-        prefix_mask,
-        leader_adv,
-        old_log_probs=leader_old_log_probs,
+        dedup_batch,
+        dedup_prefix_mask,
+        dedup_leader_adv,
+        old_log_probs=dedup_leader_old_log_probs,
     )
     metrics = {
         "hpf/enabled": 1.0,
@@ -367,8 +386,18 @@ def build_hpf_fresh_leader_batch(
         "hpf/leader_prefix_value_std": float(prefix_q.std(unbiased=True).item()),
         "hpf/minimal_grouping": 0.0 if has_tree_groups else 1.0,
         "hpf/leader_prefix_groups": float(len(unique_prefix_ids)),
+        "hpf/leader_prefix_dedup_enabled": 1.0,
+        "hpf/leader_prefix_dedup_original_rows": float(len(batch)),
+        "hpf/leader_prefix_dedup_rows": float(len(dedup_batch)),
+        "hpf/leader_prefix_dedup_factor": float(len(batch) / max(len(dedup_batch), 1)),
     }
-    return HPFMaskedBatch(batch=leader_batch, metrics=metrics, prefix_mask=prefix_mask, suffix_mask=suffix_mask)
+    return HPFMaskedBatch(
+        batch=leader_batch,
+        metrics=metrics,
+        prefix_mask=dedup_prefix_mask,
+        suffix_mask=dedup_suffix_mask,
+        source_indices=leader_indices_np,
+    )
 
 
 def build_hpf_masked_batches(
