@@ -53,7 +53,6 @@ ROLLOUT_TRAIN_TOP_P=${ROLLOUT_TRAIN_TOP_P:-1.0}
 ROLLOUT_VAL_TEMPERATURE=${ROLLOUT_VAL_TEMPERATURE:-1.0}
 ROLLOUT_VAL_TOP_P=${ROLLOUT_VAL_TOP_P:-0.7}
 ROLLOUT_VAL_N=${ROLLOUT_VAL_N:-1}
-ROLLOUT_SEED=${ROLLOUT_SEED:-42}
 
 ACTOR_PARAM_OFFLOAD=${ACTOR_PARAM_OFFLOAD:-False}
 ACTOR_OPTIMIZER_OFFLOAD=${ACTOR_OPTIMIZER_OFFLOAD:-False}
@@ -114,7 +113,6 @@ ROLLOUT=(
     actor_rollout_ref.rollout.n=${ROLLOUT_N}
     actor_rollout_ref.rollout.temperature=${ROLLOUT_TRAIN_TEMPERATURE}
     actor_rollout_ref.rollout.top_p=${ROLLOUT_TRAIN_TOP_P}
-    actor_rollout_ref.rollout.seed=${ROLLOUT_SEED}
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=${LOG_PROB_MICRO_BATCH_SIZE_PER_GPU}
     actor_rollout_ref.rollout.val_kwargs.n=${ROLLOUT_VAL_N}
     actor_rollout_ref.rollout.val_kwargs.do_sample=True
