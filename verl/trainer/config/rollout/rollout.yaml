@@ -22,6 +22,10 @@ top_k: -1
 # Top-p sampling parameter. Default 1.0.
 top_p: 1
 
+# Engine-level rollout sampling seed. This is passed to the inference engine
+# rather than assigned per trajectory.
+seed: null
+
 # typically the same as data max prompt length
 # same as data.max_prompt_length if it exists
 prompt_length: ${oc.select:data.max_prompt_length,512}
