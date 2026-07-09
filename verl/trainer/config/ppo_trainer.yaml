@@ -170,6 +170,17 @@ algorithm:
       suffix_temperature: 0.25
       suffix_top_p: 1.0
 
+    # Fresh tree sampled after the follower update for the fresh-leader branch.
+    # By default this uses the same branching factors as tree_rollout. Override
+    # these values to use a different K x L for the leader update.
+    fresh_tree_rollout:
+
+      # Number of fresh prefixes per prompt. If null, use tree_rollout.num_prefixes.
+      num_prefixes: null
+
+      # Number of fresh suffixes per fresh prefix. If null, use tree_rollout.num_suffixes.
+      num_suffixes: null
+
 # config for the trainer
 trainer:
 

@@ -1485,6 +1485,19 @@ class RayPPOTrainer:
         suffix_temperature = float(
             tree_config.get("suffix_temperature", self.config.actor_rollout_ref.rollout.temperature)
         )
+        fresh_tree_config = hpf_config.get("fresh_tree_rollout", {})
+        fresh_num_prefixes_value = fresh_tree_config.get("num_prefixes", None)
+        fresh_num_suffixes_value = fresh_tree_config.get("num_suffixes", None)
+        fresh_num_prefixes = int(
+            tree_config.get("num_prefixes", 4) if fresh_num_prefixes_value is None else fresh_num_prefixes_value
+        )
+        fresh_num_suffixes = int(
+            tree_config.get("num_suffixes", 2) if fresh_num_suffixes_value is None else fresh_num_suffixes_value
+        )
+        if fresh_num_prefixes <= 0:
+            raise ValueError(f"hpf_rlvr.fresh_tree_rollout.num_prefixes must be positive, got {fresh_num_prefixes}.")
+        if fresh_num_suffixes <= 0:
+            raise ValueError(f"hpf_rlvr.fresh_tree_rollout.num_suffixes must be positive, got {fresh_num_suffixes}.")
 
         old_log_start = time.perf_counter()
         follower_old_log_prob, _ = self._compute_old_log_prob(batch, temperature=suffix_temperature)
@@ -1567,11 +1580,15 @@ class RayPPOTrainer:
             self.checkpoint_manager.update_weights(self.global_steps)
             print(
                 "[HPF] fresh leader tree rollout start "
-                f"step={self.global_steps}",
+                f"step={self.global_steps} prefixes={fresh_num_prefixes} suffixes={fresh_num_suffixes}",
                 flush=True,
             )
             fresh_gen_output, fresh_tree_metrics = self._generate_hpf_tree_sequences(
-                gen_batch, hpf_round_index=hpf_round_index
+                gen_batch,
+                hpf_round_index=hpf_round_index,
+                num_prefixes=fresh_num_prefixes,
+                num_suffixes=fresh_num_suffixes,
+                require_rollout_n_match=False,
             )
             self.checkpoint_manager.sleep_replicas()
             prefixed_fresh_metrics = {}
@@ -1587,7 +1604,15 @@ class RayPPOTrainer:
             metrics.update(prefixed_fresh_metrics)
             fresh_gen_output.meta_info.pop("timing", None)
 
-            fresh_batch = prompt_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+            fresh_responses_per_prompt = fresh_num_prefixes * fresh_num_suffixes
+            if len(fresh_gen_output) != len(prompt_batch) * fresh_responses_per_prompt:
+                raise ValueError(
+                    "HPF fresh leader tree rollout produced an unexpected number of responses: "
+                    f"got {len(fresh_gen_output)}, expected {len(prompt_batch) * fresh_responses_per_prompt} "
+                    f"({len(prompt_batch)} prompts x {fresh_num_prefixes} prefixes x {fresh_num_suffixes} suffixes)."
+                )
+            metrics["hpf/fresh_leader_tree_responses_per_prompt"] = float(fresh_responses_per_prompt)
+            fresh_batch = prompt_batch.repeat(repeat_times=fresh_responses_per_prompt, interleave=True)
             fresh_batch = fresh_batch.union(fresh_gen_output)
             if "response_mask" not in fresh_batch.batch:
                 fresh_batch.batch["response_mask"] = compute_response_mask(fresh_batch)
@@ -1742,7 +1767,12 @@ class RayPPOTrainer:
             output.pop(batch_keys=drop_keys)
 
     def _generate_hpf_tree_sequences(
-        self, gen_batch: DataProto, hpf_round_index: int | None = None
+        self,
+        gen_batch: DataProto,
+        hpf_round_index: int | None = None,
+        num_prefixes: int | None = None,
+        num_suffixes: int | None = None,
+        require_rollout_n_match: bool = True,
     ) -> tuple[DataProto, dict[str, float]]:
         tree_start = time.perf_counter()
         if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
@@ -1752,11 +1782,21 @@ class RayPPOTrainer:
 
         hpf_config = self.config.algorithm.get("hpf_rlvr", {})
         tree_config = hpf_config.get("tree_rollout", {})
-        num_prefixes = int(tree_config.get("num_prefixes", 4))
-        num_suffixes = int(tree_config.get("num_suffixes", 2))
+        if num_prefixes is None:
+            num_prefixes = int(tree_config.get("num_prefixes", 4))
+        else:
+            num_prefixes = int(num_prefixes)
+        if num_suffixes is None:
+            num_suffixes = int(tree_config.get("num_suffixes", 2))
+        else:
+            num_suffixes = int(num_suffixes)
+        if num_prefixes <= 0:
+            raise ValueError(f"HPF tree rollout num_prefixes must be positive, got {num_prefixes}.")
+        if num_suffixes <= 0:
+            raise ValueError(f"HPF tree rollout num_suffixes must be positive, got {num_suffixes}.")
         expected_rollout_n = num_prefixes * num_suffixes
         rollout_n = int(self.config.actor_rollout_ref.rollout.n)
-        if rollout_n != expected_rollout_n:
+        if require_rollout_n_match and rollout_n != expected_rollout_n:
             raise ValueError(
                 "HPF tree rollout requires actor_rollout_ref.rollout.n to equal "
                 f"num_prefixes*num_suffixes ({expected_rollout_n}), got {rollout_n}."
@@ -1902,6 +1942,7 @@ class RayPPOTrainer:
             "hpf/horizon_round_index": float(hpf_round_index),
             "hpf/tree_num_prefixes": float(num_prefixes),
             "hpf/tree_num_suffixes": float(num_suffixes),
+            "hpf/tree_responses_per_prompt": float(expected_rollout_n),
             "hpf/tree_horizon_tokens": float(horizon),
             "hpf/tree_prefix_tokens_mean": float(prefix_lengths.mean()) if len(prefix_lengths) else 0.0,
             "hpf/tree_prefix_stopped_frac": float((~needs_suffix).mean()) if len(needs_suffix) else 0.0,

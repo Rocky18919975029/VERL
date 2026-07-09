@@ -28,6 +28,8 @@ HPF_TREE_PREFIX_TEMPERATURE=${HPF_TREE_PREFIX_TEMPERATURE:-1.0}
 HPF_TREE_PREFIX_TOP_P=${HPF_TREE_PREFIX_TOP_P:-1.0}
 HPF_TREE_SUFFIX_TEMPERATURE=${HPF_TREE_SUFFIX_TEMPERATURE:-0.25}
 HPF_TREE_SUFFIX_TOP_P=${HPF_TREE_SUFFIX_TOP_P:-1.0}
+HPF_FRESH_TREE_NUM_PREFIXES=${HPF_FRESH_TREE_NUM_PREFIXES:-${HPF_TREE_NUM_PREFIXES}}
+HPF_FRESH_TREE_NUM_SUFFIXES=${HPF_FRESH_TREE_NUM_SUFFIXES:-${HPF_TREE_NUM_SUFFIXES}}
 HPF_LOSS_AGG_MODE=${HPF_LOSS_AGG_MODE:-token-mean}
 
 # A suffix KL to theta_F is exactly zero on the first leader optimizer step.
@@ -84,6 +86,8 @@ if [ "${HPF_TREE_ROLLOUT}" = "True" ] || [ "${HPF_TREE_ROLLOUT}" = "true" ] || [
         algorithm.hpf_rlvr.tree_rollout.prefix_top_p="${HPF_TREE_PREFIX_TOP_P}"
         algorithm.hpf_rlvr.tree_rollout.suffix_temperature="${HPF_TREE_SUFFIX_TEMPERATURE}"
         algorithm.hpf_rlvr.tree_rollout.suffix_top_p="${HPF_TREE_SUFFIX_TOP_P}"
+        algorithm.hpf_rlvr.fresh_tree_rollout.num_prefixes="${HPF_FRESH_TREE_NUM_PREFIXES}"
+        algorithm.hpf_rlvr.fresh_tree_rollout.num_suffixes="${HPF_FRESH_TREE_NUM_SUFFIXES}"
     )
 fi
 
