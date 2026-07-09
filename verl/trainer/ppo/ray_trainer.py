@@ -1647,14 +1647,6 @@ class RayPPOTrainer:
 
         if suffix_kl_coef > 0 and leader_batch.suffix_mask is not None and follower_batch is not None:
             suffix_ref_log_prob = follower_updated_log_prob.batch["old_log_probs"]
-            if leader_batch.source_indices is not None:
-                suffix_ref_log_prob = suffix_ref_log_prob[
-                    torch.as_tensor(
-                        leader_batch.source_indices,
-                        device=suffix_ref_log_prob.device,
-                        dtype=torch.long,
-                    )
-                ]
             leader_batch.batch.batch["hpf_kl_ref_log_prob"] = suffix_ref_log_prob.to(
                 device=leader_batch.batch.batch["response_mask"].device, dtype=torch.float32
             )
