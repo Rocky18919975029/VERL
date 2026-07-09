@@ -1633,7 +1633,6 @@ class RayPPOTrainer:
                 leader_updated_log_prob.batch["old_log_probs"],
                 response_len=int(fresh_batch.batch["response_mask"].shape[-1]),
             )
-            follower_updated_log_prob, _ = self._compute_old_log_prob(fresh_batch, temperature=suffix_temperature)
             metrics["timing_s/hpf/fresh_leader_role_old_log_prob"] = float(time.perf_counter() - fresh_logprob_start)
             metrics["hpf/fresh_leader_prefix_log_prob_truncation_enabled"] = 1.0
             metrics["hpf/fresh_leader_prefix_log_prob_truncation_response_len"] = float(
@@ -1685,7 +1684,16 @@ class RayPPOTrainer:
             metrics["timing_s/hpf/suffix_correction_log_prob"] = metrics["timing_s/hpf/correction_log_prob"]
             metrics["timing_s/hpf/prefix_correction_log_prob"] = metrics["timing_s/hpf/correction_log_prob"]
 
-        if suffix_kl_coef > 0 and leader_batch.suffix_mask is not None and follower_batch is not None:
+        leader_suffix_kl_tokens = 0.0
+        if leader_batch.suffix_mask is not None:
+            leader_suffix_kl_tokens = float(leader_batch.suffix_mask.sum().item())
+        metrics["hpf/leader_suffix_kl_tokens"] = leader_suffix_kl_tokens
+        if (
+            suffix_kl_coef > 0
+            and leader_batch.suffix_mask is not None
+            and follower_batch is not None
+            and leader_suffix_kl_tokens > 0
+        ):
             suffix_ref_log_prob = follower_updated_log_prob.batch["old_log_probs"]
             if leader_batch.source_indices is not None:
                 suffix_ref_log_prob = suffix_ref_log_prob[
@@ -1705,6 +1713,8 @@ class RayPPOTrainer:
             leader_batch.batch.meta_info["hpf_kl_coef"] = float(suffix_kl_coef)
             leader_batch.batch.meta_info["hpf_kl_type"] = self.config.actor_rollout_ref.actor.kl_loss_type
             metrics["hpf/leader_suffix_kl_batch_size"] = float(len(leader_batch.batch))
+        elif suffix_kl_coef > 0 and leader_batch.suffix_mask is not None:
+            metrics["hpf/leader_suffix_kl_skipped_empty_mask"] = 1.0
         leader_phase_batch = leader_batch.batch
         self._set_hpf_token_temperatures(
             leader_phase_batch,
