@@ -28,6 +28,7 @@ and is designed to be fully replaceable by other agent frameworks such as:
 """
 
 import asyncio
+import hashlib
 import logging
 import os
 import random
@@ -75,6 +76,7 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 DEFAULT_ROUTING_CACHE_SIZE = 10000
+_MAX_SAMPLING_SEED = 2**32
 
 
 class AgentLoopMetrics(BaseModel):
@@ -572,6 +574,8 @@ class AgentLoopWorker:
                 values = batch.non_tensor_batch.get(source_key)
                 if values is not None:
                     sample_sampling_params[target_key] = values[i].item() if hasattr(values[i], "item") else values[i]
+            if self.rollout_config.seed is not None and "seed" not in sample_sampling_params:
+                sample_sampling_params["seed"] = _trajectory_sampling_seed(self.rollout_config.seed, trajectory_info[i])
             tasks.append(
                 asyncio.create_task(
                     self._run_agent_loop(sample_sampling_params, trajectory_info[i], trace=trace_this_sample, **kwargs)
@@ -1068,6 +1072,31 @@ async def get_trajectory_info(step, index, validate):
             rollout_n = 0
         trajectory_info.append({"step": step, "sample_index": index[i], "rollout_n": rollout_n, "validate": validate})
     return trajectory_info
+
+
+def _stable_seed_component(value: Any) -> int:
+    """Convert a dataset index into a deterministic integer across processes."""
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, (int, np.integer)):
+        return int(value)
+    raw = str(value).encode("utf-8", errors="replace")
+    return int.from_bytes(hashlib.blake2b(raw, digest_size=8).digest(), byteorder="little", signed=False)
+
+
+def _trajectory_sampling_seed(base_seed: int, trajectory: dict[str, Any]) -> int:
+    """Derive a per-trajectory sampling seed from stable rollout metadata."""
+    step = int(trajectory.get("step", -1))
+    rollout_n = int(trajectory.get("rollout_n", 0))
+    sample_index = _stable_seed_component(trajectory.get("sample_index", 0))
+    validate_offset = 17 if trajectory.get("validate", False) else 0
+    return (
+        int(base_seed)
+        + 1_000_003 * (step + 1)
+        + 9_176 * sample_index
+        + 101 * rollout_n
+        + validate_offset
+    ) % _MAX_SAMPLING_SEED
 
 
 class AgentLoopManager:

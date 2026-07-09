@@ -135,6 +135,7 @@ echo "Experiment: ${EXPERIMENT_NAME}"
 echo "Model: ${MODEL_PATH}"
 echo "Data dir: ${DATA_DIR}"
 echo "Total training steps: ${TOTAL_TRAINING_STEPS:-150}"
+echo "Rollout seed: ${ROLLOUT_SEED:-42}"
 
 # The released Re-Schedule script leaves these off and uses vLLM memory 0.6.
 # On this ACD 8xH100 colocated setup that OOMs when vLLM wakes up to sync
