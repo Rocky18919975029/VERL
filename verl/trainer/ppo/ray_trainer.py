@@ -47,8 +47,6 @@ from verl.trainer.ppo.hpf_utils import (
     build_hpf_corrected_leader_batch,
     build_hpf_fresh_leader_batch,
     build_hpf_masked_batches,
-    pad_hpf_response_tensor,
-    truncate_hpf_prefix_batch,
 )
 from verl.trainer.ppo.metric_utils import (
     compute_data_metrics,
@@ -1488,19 +1486,12 @@ class RayPPOTrainer:
             tree_config.get("suffix_temperature", self.config.actor_rollout_ref.rollout.temperature)
         )
 
-        if hpf_round_index is None:
-            hpf_round_index = self._get_hpf_round_index(None)
-        response_len = int(batch.batch["response_mask"].shape[-1])
-        hpf_horizon = min(int(hpf_round_index) * progressive_block_size, max_response_length, response_len)
-
         old_log_start = time.perf_counter()
         follower_old_log_prob, _ = self._compute_old_log_prob(batch, temperature=suffix_temperature)
-        prefix_batch = truncate_hpf_prefix_batch(batch, hpf_horizon)
-        leader_old_log_prob, _ = self._compute_old_log_prob(prefix_batch, temperature=prefix_temperature)
-        leader_old_log_probs = pad_hpf_response_tensor(
-            leader_old_log_prob.batch["old_log_probs"], response_len=response_len
-        )
+        leader_old_log_prob, _ = self._compute_old_log_prob(batch, temperature=prefix_temperature)
         role_old_log_elapsed = time.perf_counter() - old_log_start
+        if hpf_round_index is None:
+            hpf_round_index = self._get_hpf_round_index(None)
         follower_batch, leader_batch = build_hpf_masked_batches(
             batch=batch,
             round_index=hpf_round_index,
@@ -1509,14 +1500,9 @@ class RayPPOTrainer:
             epsilon=epsilon,
             std_normalize=std_normalize,
             follower_old_log_probs=follower_old_log_prob.batch["old_log_probs"],
-            leader_old_log_probs=leader_old_log_probs,
+            leader_old_log_probs=leader_old_log_prob.batch["old_log_probs"],
         )
         metrics = dict(leader_batch.metrics)
-        metrics["hpf/prefix_log_prob_truncation_enabled"] = 1.0
-        metrics["hpf/prefix_log_prob_truncation_response_len"] = float(
-            prefix_batch.batch["responses"].shape[-1]
-        )
-        metrics["hpf/prefix_log_prob_truncation_original_response_len"] = float(response_len)
         metrics["hpf/prefix_loss_temperature"] = prefix_temperature
         metrics["hpf/suffix_loss_temperature"] = suffix_temperature
         metrics["timing_s/hpf/role_old_log_prob"] = float(role_old_log_elapsed)
@@ -1625,23 +1611,9 @@ class RayPPOTrainer:
             metrics["timing_s/hpf/fresh_leader_reward"] = float(time.perf_counter() - fresh_reward_start)
 
             fresh_logprob_start = time.perf_counter()
-            fresh_prefix_batch = truncate_hpf_prefix_batch(fresh_batch, hpf_horizon)
-            leader_updated_log_prob, _ = self._compute_old_log_prob(
-                fresh_prefix_batch, temperature=prefix_temperature
-            )
-            leader_updated_log_probs = pad_hpf_response_tensor(
-                leader_updated_log_prob.batch["old_log_probs"],
-                response_len=int(fresh_batch.batch["response_mask"].shape[-1]),
-            )
+            leader_updated_log_prob, _ = self._compute_old_log_prob(fresh_batch, temperature=prefix_temperature)
             follower_updated_log_prob, _ = self._compute_old_log_prob(fresh_batch, temperature=suffix_temperature)
             metrics["timing_s/hpf/fresh_leader_role_old_log_prob"] = float(time.perf_counter() - fresh_logprob_start)
-            metrics["hpf/fresh_leader_prefix_log_prob_truncation_enabled"] = 1.0
-            metrics["hpf/fresh_leader_prefix_log_prob_truncation_response_len"] = float(
-                fresh_prefix_batch.batch["responses"].shape[-1]
-            )
-            metrics["hpf/fresh_leader_prefix_log_prob_truncation_original_response_len"] = float(
-                fresh_batch.batch["response_mask"].shape[-1]
-            )
             leader_batch = build_hpf_fresh_leader_batch(
                 batch=fresh_batch,
                 round_index=hpf_round_index,
@@ -1649,33 +1621,21 @@ class RayPPOTrainer:
                 max_response_length=max_response_length,
                 epsilon=epsilon,
                 std_normalize=std_normalize,
-                leader_old_log_probs=leader_updated_log_probs,
+                leader_old_log_probs=leader_updated_log_prob.batch["old_log_probs"],
             )
             metrics.update(leader_batch.metrics)
-            print(
-                "[HPF] leader prefix dedup/truncate "
-                f"step={self.global_steps} original_rows={metrics.get('hpf/leader_prefix_dedup_original_rows')} "
-                f"dedup_rows={metrics.get('hpf/leader_prefix_dedup_rows')} "
-                f"factor={metrics.get('hpf/leader_prefix_dedup_factor')} "
-                f"response_len={metrics.get('hpf/leader_prefix_truncation_response_len')} "
-                f"seq_len={metrics.get('hpf/leader_prefix_truncation_seq_len')}",
-                flush=True,
-            )
             metrics["timing_s/hpf/fresh_leader_total"] = float(time.perf_counter() - fresh_start)
         elif follower_batch is not None and leader_batch.suffix_mask is not None:
             correction_start = time.perf_counter()
             follower_updated_log_prob, _ = self._compute_old_log_prob(batch, temperature=suffix_temperature)
-            leader_updated_log_prob, _ = self._compute_old_log_prob(prefix_batch, temperature=prefix_temperature)
-            leader_updated_log_probs = pad_hpf_response_tensor(
-                leader_updated_log_prob.batch["old_log_probs"], response_len=response_len
-            )
+            leader_updated_log_prob, _ = self._compute_old_log_prob(batch, temperature=prefix_temperature)
             leader_batch = build_hpf_corrected_leader_batch(
                 batch=batch,
                 round_index=hpf_round_index,
                 progressive_block_size=progressive_block_size,
                 max_response_length=max_response_length,
-                leader_old_log_probs=leader_old_log_probs,
-                leader_post_follower_log_probs=leader_updated_log_probs,
+                leader_old_log_probs=leader_old_log_prob.batch["old_log_probs"],
+                leader_post_follower_log_probs=leader_updated_log_prob.batch["old_log_probs"],
                 follower_old_log_probs=follower_old_log_prob.batch["old_log_probs"],
                 follower_post_follower_log_probs=follower_updated_log_prob.batch["old_log_probs"],
                 correction_clip=correction_clip,
@@ -1695,7 +1655,6 @@ class RayPPOTrainer:
                         dtype=torch.long,
                     )
                 ]
-            suffix_ref_log_prob = suffix_ref_log_prob[..., : leader_batch.batch.batch["response_mask"].shape[-1]]
             leader_batch.batch.batch["hpf_kl_ref_log_prob"] = suffix_ref_log_prob.to(
                 device=leader_batch.batch.batch["response_mask"].device, dtype=torch.float32
             )

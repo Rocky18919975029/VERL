@@ -147,81 +147,6 @@ def _clone_for_masked_update(
     return update_batch
 
 
-def truncate_hpf_prefix_batch(batch: DataProto, horizon: int) -> DataProto:
-    """Return a copy that keeps the full prompt and only the first horizon response columns.
-
-    HPF leader updates are prefix-level: the loss and old-log-prob references only
-    need response tokens up to the progressive horizon. Keeping the suffix in
-    `input_ids` would make the actor forward pay for the full trajectory even
-    though the suffix is fully masked out.
-    """
-    if "responses" not in batch.batch:
-        raise ValueError("responses is required for HPF prefix truncation")
-    if "prompts" not in batch.batch:
-        raise ValueError("prompts is required for HPF prefix truncation")
-
-    response_len = int(batch.batch["responses"].shape[-1])
-    keep_response_len = min(max(int(horizon), 0), response_len)
-    prompt_len = int(batch.batch["prompts"].shape[-1])
-    full_seq_len = prompt_len + response_len
-    keep_seq_len = prompt_len + keep_response_len
-
-    truncated = batch.select(
-        batch_keys=list(batch.batch.keys()),
-        non_tensor_batch_keys=list(batch.non_tensor_batch.keys()),
-        meta_info_keys=list(batch.meta_info.keys()),
-        deepcopy=True,
-    )
-    for key, value in list(truncated.batch.items()):
-        if not torch.is_tensor(value) or value.ndim < 2:
-            continue
-        if key == "prompts":
-            continue
-        if value.shape[-1] == response_len:
-            truncated.batch[key] = value[..., :keep_response_len]
-        elif value.shape[-1] == full_seq_len:
-            truncated.batch[key] = value[..., :keep_seq_len]
-
-    if "attention_mask" in truncated.batch:
-        truncated.meta_info["global_token_num"] = torch.sum(truncated.batch["attention_mask"], dim=-1).tolist()
-    truncated.meta_info["hpf_prefix_truncated"] = True
-    truncated.meta_info["hpf_prefix_truncated_response_len"] = keep_response_len
-    truncated.meta_info["hpf_prefix_original_response_len"] = response_len
-    return truncated
-
-
-def pad_hpf_response_tensor(tensor: torch.Tensor, response_len: int, pad_value: float = 0.0) -> torch.Tensor:
-    """Right-pad a response-token tensor back to the full response length."""
-    current_len = int(tensor.shape[-1])
-    response_len = int(response_len)
-    if current_len == response_len:
-        return tensor
-    if current_len > response_len:
-        return tensor[..., :response_len]
-    pad_shape = (*tensor.shape[:-1], response_len - current_len)
-    pad = torch.full(pad_shape, pad_value, dtype=tensor.dtype, device=tensor.device)
-    return torch.cat([tensor, pad], dim=-1)
-
-
-def _truncate_prefix_update_batch(
-    update_batch: DataProto, horizon: int, metrics_prefix: str
-) -> tuple[DataProto, dict[str, float]]:
-    original_rows = len(update_batch)
-    original_response_len = int(update_batch.batch["responses"].shape[-1])
-    original_seq_len = int(update_batch.batch["input_ids"].shape[-1]) if "input_ids" in update_batch.batch else 0
-    truncated = truncate_hpf_prefix_batch(update_batch, horizon)
-    truncated_response_len = int(truncated.batch["responses"].shape[-1])
-    truncated_seq_len = int(truncated.batch["input_ids"].shape[-1]) if "input_ids" in truncated.batch else 0
-    return truncated, {
-        f"{metrics_prefix}_prefix_truncation_enabled": 1.0,
-        f"{metrics_prefix}_prefix_truncation_rows": float(original_rows),
-        f"{metrics_prefix}_prefix_truncation_original_response_len": float(original_response_len),
-        f"{metrics_prefix}_prefix_truncation_response_len": float(truncated_response_len),
-        f"{metrics_prefix}_prefix_truncation_original_seq_len": float(original_seq_len),
-        f"{metrics_prefix}_prefix_truncation_seq_len": float(truncated_seq_len),
-    }
-
-
 def _masked_sequence_correction(
     updated_log_probs: torch.Tensor,
     old_log_probs: torch.Tensor,
@@ -343,9 +268,6 @@ def build_hpf_corrected_leader_batch(
         leader_adv,
         old_log_probs=leader_post_follower_log_probs,
     )
-    leader_batch, trunc_metrics = _truncate_prefix_update_batch(
-        leader_batch, horizon=horizon, metrics_prefix="hpf/leader"
-    )
     suffix_nonempty = suffix_mask.sum(dim=-1) > 0
     metrics = {
         "hpf/enabled": 1.0,
@@ -365,16 +287,10 @@ def build_hpf_corrected_leader_batch(
     }
     metrics.update(prefix_metrics)
     metrics.update(suffix_metrics)
-    metrics.update(trunc_metrics)
     # Backward-compatible metric aliases for the existing dashboard.
     for key, value in suffix_metrics.items():
         metrics[key.replace("hpf/suffix_correction", "hpf/correction")] = value
-    return HPFMaskedBatch(
-        batch=leader_batch,
-        metrics=metrics,
-        prefix_mask=leader_batch.batch["hpf_pg_mask"],
-        suffix_mask=suffix_mask[..., : leader_batch.batch["responses"].shape[-1]],
-    )
+    return HPFMaskedBatch(batch=leader_batch, metrics=metrics, prefix_mask=prefix_mask, suffix_mask=suffix_mask)
 
 
 def build_hpf_fresh_leader_batch(
@@ -456,9 +372,6 @@ def build_hpf_fresh_leader_batch(
         dedup_leader_adv,
         old_log_probs=dedup_leader_old_log_probs,
     )
-    leader_batch, trunc_metrics = _truncate_prefix_update_batch(
-        leader_batch, horizon=horizon, metrics_prefix="hpf/leader"
-    )
     metrics = {
         "hpf/enabled": 1.0,
         "hpf/fresh_leader_tree_enabled": 1.0,
@@ -478,12 +391,11 @@ def build_hpf_fresh_leader_batch(
         "hpf/leader_prefix_dedup_rows": float(len(dedup_batch)),
         "hpf/leader_prefix_dedup_factor": float(len(batch) / max(len(dedup_batch), 1)),
     }
-    metrics.update(trunc_metrics)
     return HPFMaskedBatch(
         batch=leader_batch,
         metrics=metrics,
-        prefix_mask=leader_batch.batch["hpf_pg_mask"],
-        suffix_mask=dedup_suffix_mask[..., : leader_batch.batch["responses"].shape[-1]],
+        prefix_mask=dedup_prefix_mask,
+        suffix_mask=dedup_suffix_mask,
         source_indices=leader_indices_np,
     )
 
