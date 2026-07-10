@@ -149,6 +149,18 @@ algorithm:
     # Set to 0 to disable. This is only used by the experimental HPF path.
     progress_log_interval: 1
 
+    # Restrict HPF actor updates to a progressive local response window while
+    # keeping rollout, reward, and advantage construction unchanged. Disabled by
+    # default to preserve existing experiments.
+    local_update_window:
+
+      # Whether to only update the current suffix block.
+      enable: False
+
+      # Number of suffix tokens to train after the current horizon. If null,
+      # use progressive_block_size.
+      size: null
+
     # Two-stage prefix-follower rollout construction. Disabled by default so
     # existing GRPO and masked HPF smoke paths remain unchanged.
     tree_rollout:

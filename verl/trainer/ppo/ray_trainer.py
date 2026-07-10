@@ -1462,6 +1462,135 @@ class RayPPOTrainer:
             "hpf/correction_ratio_min": float(correction.min().item()),
         }
 
+    @staticmethod
+    def _parse_hpf_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
+    @staticmethod
+    def _compute_hpf_local_suffix_window(
+        response_mask: torch.Tensor,
+        *,
+        horizon: int,
+        window_size: int,
+    ) -> torch.Tensor:
+        response_len = response_mask.shape[-1]
+        start = min(max(int(horizon), 0), response_len)
+        end = min(start + max(int(window_size), 0), response_len)
+        positions = torch.arange(response_len, device=response_mask.device).unsqueeze(0)
+        return ((positions >= start) & (positions < end) & response_mask.bool()).to(response_mask.dtype)
+
+    @staticmethod
+    def _truncate_hpf_update_batch_response(batch: DataProto, response_cutoff: int) -> int:
+        response_len = batch.batch["responses"].shape[-1]
+        cutoff = min(max(int(response_cutoff), 1), response_len)
+        if cutoff >= response_len:
+            return response_len
+
+        prompt_len = batch.batch["prompts"].shape[-1]
+        seq_len = prompt_len + response_len
+        seq_cutoff = prompt_len + cutoff
+        response_keys = {
+            "responses",
+            "response_mask",
+            "old_log_probs",
+            "advantages",
+            "returns",
+            "hpf_pg_mask",
+            "hpf_kl_mask",
+            "hpf_kl_ref_log_prob",
+            "ref_log_prob",
+            "rollout_log_probs",
+            "token_level_scores",
+            "token_level_rewards",
+        }
+        sequence_keys = {"input_ids", "attention_mask", "position_ids"}
+
+        for key in response_keys:
+            value = batch.batch.get(key, None)
+            if isinstance(value, torch.Tensor) and value.shape[-1] == response_len:
+                batch.batch[key] = value[..., :cutoff].contiguous()
+
+        for key in sequence_keys:
+            value = batch.batch.get(key, None)
+            if isinstance(value, torch.Tensor) and value.shape[-1] == seq_len:
+                batch.batch[key] = value[..., :seq_cutoff].contiguous()
+
+        if "attention_mask" in batch.batch:
+            batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
+
+        return cutoff
+
+    def _apply_hpf_local_update_window(
+        self,
+        *,
+        batch: DataProto,
+        hpf_round_index: int,
+        progressive_block_size: int,
+        max_response_length: int,
+        window_size: int,
+        phase: str,
+        metrics: dict[str, float],
+    ) -> DataProto:
+        response_mask = batch.batch["response_mask"]
+        response_len = response_mask.shape[-1]
+        horizon = min(int(hpf_round_index) * int(progressive_block_size), int(max_response_length), response_len)
+        local_suffix_mask = self._compute_hpf_local_suffix_window(
+            response_mask,
+            horizon=horizon,
+            window_size=window_size,
+        )
+        old_pg_tokens = (
+            batch.batch["hpf_pg_mask"].sum().item() if "hpf_pg_mask" in batch.batch else response_mask.sum().item()
+        )
+        old_kl_tokens = batch.batch["hpf_kl_mask"].sum().item() if "hpf_kl_mask" in batch.batch else 0.0
+
+        if phase == "follower":
+            # Follower PG only trains the current suffix block. Its prefix KL,
+            # when enabled, remains on the prefix up to the horizon.
+            batch.batch["hpf_pg_mask"] = local_suffix_mask
+            batch.batch["advantages"] = batch.batch["advantages"] * local_suffix_mask.to(batch.batch["advantages"])
+            batch.batch["returns"] = batch.batch["advantages"]
+        elif phase == "leader":
+            # Leader PG remains prefix-level; only the suffix KL is restricted
+            # to the current local suffix block.
+            if "hpf_kl_mask" in batch.batch:
+                batch.batch["hpf_kl_mask"] = local_suffix_mask
+        else:
+            raise ValueError(f"Unsupported HPF local update phase: {phase}")
+
+        local_pg_tokens = (
+            batch.batch["hpf_pg_mask"].sum().item() if "hpf_pg_mask" in batch.batch else response_mask.sum().item()
+        )
+        local_kl_tokens = batch.batch["hpf_kl_mask"].sum().item() if "hpf_kl_mask" in batch.batch else 0.0
+        local_nonempty_frac = float((local_suffix_mask.sum(dim=-1) > 0).float().mean().item())
+        truncated_response_len = self._truncate_hpf_update_batch_response(batch, horizon + window_size)
+        prefix = f"hpf/local_update_window/{phase}"
+        metrics[f"{prefix}_enabled"] = 1.0
+        metrics[f"{prefix}_horizon_tokens"] = float(horizon)
+        metrics[f"{prefix}_window_size"] = float(window_size)
+        metrics[f"{prefix}_response_len_after_truncate"] = float(truncated_response_len)
+        metrics[f"{prefix}_pg_tokens_before"] = float(old_pg_tokens)
+        metrics[f"{prefix}_pg_tokens_after"] = float(local_pg_tokens)
+        metrics[f"{prefix}_kl_tokens_before"] = float(old_kl_tokens)
+        metrics[f"{prefix}_kl_tokens_after"] = float(local_kl_tokens)
+        metrics[f"{prefix}_nonempty_frac"] = local_nonempty_frac
+        print(
+            "[HPF] local update window applied "
+            f"step={self.global_steps} phase={phase} horizon={horizon} window={window_size} "
+            f"pg_tokens={float(old_pg_tokens):.0f}->{float(local_pg_tokens):.0f} "
+            f"kl_tokens={float(old_kl_tokens):.0f}->{float(local_kl_tokens):.0f} "
+            f"response_len={response_len}->{truncated_response_len} "
+            f"nonempty_frac={local_nonempty_frac:.4f}",
+            flush=True,
+        )
+        return batch
+
     def _update_actor_hpf_masked_grpo(
         self,
         batch: DataProto,
@@ -1478,6 +1607,16 @@ class RayPPOTrainer:
         prefix_kl_coef = float(hpf_config.get("prefix_kl_coef", 0.0))
         suffix_kl_coef = float(hpf_config.get("suffix_kl_coef", 0.0))
         correction_clip = self._parse_hpf_float(hpf_config.get("correction_clip", float("inf")), float("inf"))
+        local_window_config = hpf_config.get("local_update_window", {})
+        local_update_window = self._parse_hpf_bool(local_window_config.get("enable", False), False)
+        local_window_size_value = local_window_config.get("size", None)
+        local_window_size = (
+            progressive_block_size
+            if local_window_size_value is None or str(local_window_size_value).lower() == "null"
+            else int(local_window_size_value)
+        )
+        if local_update_window and local_window_size <= 0:
+            raise ValueError(f"hpf_rlvr.local_update_window.size must be positive, got {local_window_size}.")
         fresh_leader_tree_value = hpf_config.get("fresh_leader_tree", False)
         fresh_leader_tree = (
             fresh_leader_tree_value
@@ -1559,6 +1698,8 @@ class RayPPOTrainer:
         metrics["hpf/suffix_kl_coef"] = suffix_kl_coef
         metrics["hpf/correction_clip"] = correction_clip
         metrics["hpf/fresh_leader_tree_enabled"] = float(fresh_leader_tree)
+        metrics["hpf/local_update_window_enabled"] = float(local_update_window)
+        metrics["hpf/local_update_window_size"] = float(local_window_size)
         if follower_batch is not None:
             follower_mini_batch_size = (
                 self.config.actor_rollout_ref.actor.ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
@@ -1567,6 +1708,16 @@ class RayPPOTrainer:
             if prefix_kl_coef > 0:
                 follower_phase_batch.meta_info["hpf_kl_coef"] = float(prefix_kl_coef)
                 follower_phase_batch.meta_info["hpf_kl_type"] = self.config.actor_rollout_ref.actor.kl_loss_type
+            if local_update_window:
+                follower_phase_batch = self._apply_hpf_local_update_window(
+                    batch=follower_phase_batch,
+                    hpf_round_index=hpf_round_index,
+                    progressive_block_size=progressive_block_size,
+                    max_response_length=max_response_length,
+                    window_size=local_window_size,
+                    phase="follower",
+                    metrics=metrics,
+                )
             self._set_hpf_token_temperatures(
                 follower_phase_batch,
                 pg_temperature=suffix_temperature,
@@ -1749,6 +1900,16 @@ class RayPPOTrainer:
             leader_batch.batch.meta_info["hpf_kl_type"] = self.config.actor_rollout_ref.actor.kl_loss_type
             metrics["hpf/leader_suffix_kl_batch_size"] = float(len(leader_batch.batch))
         leader_phase_batch = leader_batch.batch
+        if local_update_window:
+            leader_phase_batch = self._apply_hpf_local_update_window(
+                batch=leader_phase_batch,
+                hpf_round_index=hpf_round_index,
+                progressive_block_size=progressive_block_size,
+                max_response_length=max_response_length,
+                window_size=local_window_size,
+                phase="leader",
+                metrics=metrics,
+            )
         self._set_hpf_token_temperatures(
             leader_phase_batch,
             pg_temperature=prefix_temperature,
