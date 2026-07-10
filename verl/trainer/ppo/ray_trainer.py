@@ -1284,7 +1284,13 @@ class RayPPOTrainer:
 
         return ref_log_prob
 
-    def _compute_old_log_prob(self, batch: DataProto, *, temperature: float | None = None):
+    def _compute_old_log_prob(
+        self,
+        batch: DataProto,
+        *,
+        temperature: float | None = None,
+        calculate_entropy: bool = True,
+    ):
         # TODO: remove step 1, 2, 4 after we make the whole training tensordict and padding free
         # step 1: convert dataproto to tensordict.
         batch_td = batch.to_tensordict()
@@ -1297,7 +1303,7 @@ class RayPPOTrainer:
             metadata["temperature"] = float(temperature)
         tu.assign_non_tensor(
             batch_td,
-            calculate_entropy=True,
+            calculate_entropy=calculate_entropy,
             calculate_sum_pi_squared=calculate_sum_pi_squared,
             compute_loss=False,
             **metadata,
@@ -1311,12 +1317,15 @@ class RayPPOTrainer:
 
         old_log_prob_mfu = tu.get(output, "metrics")["mfu"]
         # step 4. No padding to padding
-        entropy = no_padding_2_padding(entropy, batch_td)
+        if entropy is not None:
+            entropy = no_padding_2_padding(entropy, batch_td)
         log_probs = no_padding_2_padding(log_probs, batch_td)
         if sum_pi_squared is not None:
             sum_pi_squared = no_padding_2_padding(sum_pi_squared, batch_td)
         # step 5: rebuild a tensordict and convert to dataproto
-        result = {"old_log_probs": log_probs.float(), "entropys": entropy.float()}
+        result = {"old_log_probs": log_probs.float()}
+        if entropy is not None:
+            result["entropys"] = entropy.float()
         if routed_experts is not None:
             result["routed_experts"] = routed_experts
         if sum_pi_squared is not None:
@@ -1500,8 +1509,12 @@ class RayPPOTrainer:
             raise ValueError(f"hpf_rlvr.fresh_tree_rollout.num_suffixes must be positive, got {fresh_num_suffixes}.")
 
         old_log_start = time.perf_counter()
-        follower_old_log_prob, _ = self._compute_old_log_prob(batch, temperature=suffix_temperature)
-        leader_old_log_prob, _ = self._compute_old_log_prob(batch, temperature=prefix_temperature)
+        follower_old_log_prob, _ = self._compute_old_log_prob(
+            batch, temperature=suffix_temperature, calculate_entropy=False
+        )
+        leader_old_log_prob, _ = self._compute_old_log_prob(
+            batch, temperature=prefix_temperature, calculate_entropy=False
+        )
         role_old_log_elapsed = time.perf_counter() - old_log_start
         if hpf_round_index is None:
             hpf_round_index = self._get_hpf_round_index(None)
@@ -1636,8 +1649,12 @@ class RayPPOTrainer:
             metrics["timing_s/hpf/fresh_leader_reward"] = float(time.perf_counter() - fresh_reward_start)
 
             fresh_logprob_start = time.perf_counter()
-            leader_updated_log_prob, _ = self._compute_old_log_prob(fresh_batch, temperature=prefix_temperature)
-            follower_updated_log_prob, _ = self._compute_old_log_prob(fresh_batch, temperature=suffix_temperature)
+            leader_updated_log_prob, _ = self._compute_old_log_prob(
+                fresh_batch, temperature=prefix_temperature, calculate_entropy=False
+            )
+            follower_updated_log_prob, _ = self._compute_old_log_prob(
+                fresh_batch, temperature=suffix_temperature, calculate_entropy=False
+            )
             metrics["timing_s/hpf/fresh_leader_role_old_log_prob"] = float(time.perf_counter() - fresh_logprob_start)
             leader_batch = build_hpf_fresh_leader_batch(
                 batch=fresh_batch,
@@ -1652,8 +1669,12 @@ class RayPPOTrainer:
             metrics["timing_s/hpf/fresh_leader_total"] = float(time.perf_counter() - fresh_start)
         elif follower_batch is not None and leader_batch.suffix_mask is not None:
             correction_start = time.perf_counter()
-            follower_updated_log_prob, _ = self._compute_old_log_prob(batch, temperature=suffix_temperature)
-            leader_updated_log_prob, _ = self._compute_old_log_prob(batch, temperature=prefix_temperature)
+            follower_updated_log_prob, _ = self._compute_old_log_prob(
+                batch, temperature=suffix_temperature, calculate_entropy=False
+            )
+            leader_updated_log_prob, _ = self._compute_old_log_prob(
+                batch, temperature=prefix_temperature, calculate_entropy=False
+            )
             leader_batch = build_hpf_corrected_leader_batch(
                 batch=batch,
                 round_index=hpf_round_index,
