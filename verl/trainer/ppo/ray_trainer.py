@@ -1509,12 +1509,34 @@ class RayPPOTrainer:
             raise ValueError(f"hpf_rlvr.fresh_tree_rollout.num_suffixes must be positive, got {fresh_num_suffixes}.")
 
         old_log_start = time.perf_counter()
-        follower_old_log_prob, _ = self._compute_old_log_prob(
-            batch, temperature=suffix_temperature, calculate_entropy=False
+        has_hpf_rollout_old_log_probs = (
+            "hpf_follower_rollout_old_log_probs" in batch.batch
+            and "hpf_leader_rollout_old_log_probs" in batch.batch
         )
-        leader_old_log_prob, _ = self._compute_old_log_prob(
-            batch, temperature=prefix_temperature, calculate_entropy=False
-        )
+        if has_hpf_rollout_old_log_probs:
+            follower_old_log_prob = DataProto.from_single_dict(
+                {"old_log_probs": batch.batch["hpf_follower_rollout_old_log_probs"]}
+            )
+            leader_old_log_prob = DataProto.from_single_dict(
+                {"old_log_probs": batch.batch["hpf_leader_rollout_old_log_probs"]}
+            )
+            print(
+                "[HPF] initial old_log_prob skipped "
+                f"step={self.global_steps} source=tree_rollout_log_probs",
+                flush=True,
+            )
+        else:
+            follower_old_log_prob, _ = self._compute_old_log_prob(
+                batch, temperature=suffix_temperature, calculate_entropy=False
+            )
+            leader_old_log_prob, _ = self._compute_old_log_prob(
+                batch, temperature=prefix_temperature, calculate_entropy=False
+            )
+            print(
+                "[HPF] initial old_log_prob recomputed "
+                f"step={self.global_steps} source=actor_forward",
+                flush=True,
+            )
         role_old_log_elapsed = time.perf_counter() - old_log_start
         if hpf_round_index is None:
             hpf_round_index = self._get_hpf_round_index(None)
@@ -1532,6 +1554,7 @@ class RayPPOTrainer:
         metrics["hpf/prefix_loss_temperature"] = prefix_temperature
         metrics["hpf/suffix_loss_temperature"] = suffix_temperature
         metrics["timing_s/hpf/role_old_log_prob"] = float(role_old_log_elapsed)
+        metrics["hpf/initial_old_log_prob_skipped"] = float(has_hpf_rollout_old_log_probs)
         metrics["hpf/prefix_kl_coef"] = prefix_kl_coef
         metrics["hpf/suffix_kl_coef"] = suffix_kl_coef
         metrics["hpf/correction_clip"] = correction_clip
@@ -1781,8 +1804,8 @@ class RayPPOTrainer:
     @staticmethod
     def _drop_hpf_tree_unused_batch_keys(output: DataProto) -> None:
         # Tree suffix requests use prefix prefill, so rollout logprobs are not a
-        # complete logprob record for the final prompt+response trajectory.
-        # Old logprobs are recomputed after reward, as in the normal GRPO path.
+        # complete standalone old-logprob record. The HPF tree path extracts and
+        # repacks them into explicit leader/follower old-logprob tensors.
         drop_keys = [key for key in ("rollout_log_probs",) if key in output.batch]
         if drop_keys:
             output.pop(batch_keys=drop_keys)
@@ -1839,7 +1862,7 @@ class RayPPOTrainer:
         prefix_batch.meta_info["temperature"] = float(tree_config.get("prefix_temperature", 1.0))
         prefix_batch.meta_info["top_p"] = float(tree_config.get("prefix_top_p", 1.0))
         prefix_batch.meta_info["max_tokens"] = horizon
-        prefix_batch.meta_info["logprobs"] = False
+        prefix_batch.meta_info["logprobs"] = True
         rollout_worker_divisor = int(self.config.actor_rollout_ref.rollout.agent.num_workers)
         prefix_batch_padded, prefix_pad_size = pad_dataproto_to_divisor(prefix_batch, rollout_worker_divisor)
         prefix_start = time.perf_counter()
@@ -1858,6 +1881,9 @@ class RayPPOTrainer:
         )
         prefix_timing = prefix_output.meta_info.get("timing", {})
         prefix_output.meta_info.pop("timing", None)
+        prefix_rollout_log_probs = prefix_output.batch.get("rollout_log_probs", None)
+        if prefix_rollout_log_probs is None:
+            raise ValueError("HPF tree prefix rollout did not return rollout_log_probs.")
         self._drop_hpf_tree_unused_batch_keys(prefix_output)
 
         prefix_token_ids = self._extract_response_token_ids(prefix_output)
@@ -1881,7 +1907,7 @@ class RayPPOTrainer:
             suffix_source.non_tensor_batch["__max_tokens__"] = suffix_budgets.astype(np.int32)
             suffix_source.meta_info["temperature"] = float(tree_config.get("suffix_temperature", 0.25))
             suffix_source.meta_info["top_p"] = float(tree_config.get("suffix_top_p", 1.0))
-            suffix_source.meta_info["logprobs"] = False
+            suffix_source.meta_info["logprobs"] = True
             suffix_source_padded, suffix_pad_size = pad_dataproto_to_divisor(suffix_source, rollout_worker_divisor)
             suffix_start = time.perf_counter()
             print(
@@ -1901,6 +1927,9 @@ class RayPPOTrainer:
             )
             suffix_timing = suffix_output.meta_info.get("timing", {})
             suffix_output.meta_info.pop("timing", None)
+            suffix_rollout_log_probs = suffix_output.batch.get("rollout_log_probs", None)
+            if suffix_rollout_log_probs is None:
+                raise ValueError("HPF tree suffix rollout did not return rollout_log_probs.")
             self._drop_hpf_tree_unused_batch_keys(suffix_output)
             internal_sampling_keys = [
                 key
@@ -1919,6 +1948,7 @@ class RayPPOTrainer:
                 suffix_output.pop(non_tensor_batch_keys=internal_sampling_keys)
         else:
             suffix_pad_size = 0
+            suffix_rollout_log_probs = None
             print(
                 "[HPF] suffix rollout skipped "
                 f"step={self.global_steps} prefixes_needing_suffix=0",
@@ -1930,14 +1960,24 @@ class RayPPOTrainer:
         ordered_prefix_indices = []
         ordered_suffix_indices = []
         ordered_prefix_token_ids = []
+        ordered_leader_old_log_probs = []
+        ordered_follower_old_log_probs = []
         for prefix_row in range(len(prefix_output)):
             if needs_suffix[prefix_row]:
                 for suffix_idx in range(num_suffixes):
-                    ordered_outputs.append(suffix_output[suffix_cursor + suffix_idx : suffix_cursor + suffix_idx + 1])
+                    suffix_row = suffix_cursor + suffix_idx
+                    ordered_outputs.append(suffix_output[suffix_row : suffix_row + 1])
                     ordered_problem_uids.append(problem_uids[prefix_row])
                     ordered_prefix_indices.append(prefix_indices[prefix_row])
                     ordered_suffix_indices.append(suffix_idx)
                     ordered_prefix_token_ids.append(prefix_token_ids[prefix_row])
+                    follower_log_probs = suffix_rollout_log_probs[suffix_row].clone()
+                    leader_log_probs = torch.zeros_like(follower_log_probs)
+                    prefix_len = int(prefix_lengths[prefix_row])
+                    if prefix_len > 0:
+                        leader_log_probs[:prefix_len] = prefix_rollout_log_probs[prefix_row, :prefix_len]
+                    ordered_leader_old_log_probs.append(leader_log_probs)
+                    ordered_follower_old_log_probs.append(follower_log_probs)
                 suffix_cursor += num_suffixes
             else:
                 repeated_prefix_output = prefix_output[prefix_row : prefix_row + 1].repeat(
@@ -1949,8 +1989,14 @@ class RayPPOTrainer:
                     ordered_prefix_indices.append(prefix_indices[prefix_row])
                     ordered_suffix_indices.append(suffix_idx)
                     ordered_prefix_token_ids.append(prefix_token_ids[prefix_row])
+                    leader_log_probs = prefix_rollout_log_probs[prefix_row].clone()
+                    follower_log_probs = torch.zeros_like(leader_log_probs)
+                    ordered_leader_old_log_probs.append(leader_log_probs)
+                    ordered_follower_old_log_probs.append(follower_log_probs)
 
         tree_output = DataProto.concat(ordered_outputs)
+        tree_output.batch["hpf_leader_rollout_old_log_probs"] = torch.stack(ordered_leader_old_log_probs, dim=0)
+        tree_output.batch["hpf_follower_rollout_old_log_probs"] = torch.stack(ordered_follower_old_log_probs, dim=0)
         self._add_hpf_tree_metadata(
             tree_output,
             problem_uids=np.asarray(ordered_problem_uids, dtype=object),
@@ -1967,6 +2013,7 @@ class RayPPOTrainer:
             "hpf/tree_horizon_tokens": float(horizon),
             "hpf/tree_prefix_tokens_mean": float(prefix_lengths.mean()) if len(prefix_lengths) else 0.0,
             "hpf/tree_prefix_stopped_frac": float((~needs_suffix).mean()) if len(needs_suffix) else 0.0,
+            "hpf/tree_rollout_log_probs_available": 1.0,
             "hpf/tree_prefix_pad_size": float(prefix_pad_size),
             "hpf/tree_suffix_pad_size": float(suffix_pad_size) if suffix_output is not None else 0.0,
             "timing_s/hpf/tree_rollout_total_wall": float(time.perf_counter() - tree_start),

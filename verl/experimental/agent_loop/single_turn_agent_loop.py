@@ -76,14 +76,15 @@ class SingleTurnAgentLoop(AgentLoopBase):
             metrics["num_preempted"] = output.num_preempted if output.num_preempted is not None else -1
         response_ids = (prefix_ids or []) + output.token_ids
         response_mask = [1] * len(response_ids)
+        response_logprobs = None
+        if output.log_probs:
+            response_logprobs = ([0.0] * len(prefix_ids or [])) + output.log_probs
 
         output: AgentLoopOutput = AgentLoopOutput(
             prompt_ids=prompt_ids,
             response_ids=response_ids[: self.response_length],
             response_mask=response_mask[: self.response_length],
-            response_logprobs=(
-                None if prefix_ids else (output.log_probs[: self.response_length] if output.log_probs else None)
-            ),
+            response_logprobs=response_logprobs[: self.response_length] if response_logprobs is not None else None,
             routed_experts=(
                 output.routed_experts[: len(prompt_ids) + self.response_length]
                 if output.routed_experts is not None
