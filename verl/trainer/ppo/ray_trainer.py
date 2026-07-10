@@ -1672,13 +1672,36 @@ class RayPPOTrainer:
             metrics["timing_s/hpf/fresh_leader_reward"] = float(time.perf_counter() - fresh_reward_start)
 
             fresh_logprob_start = time.perf_counter()
-            leader_updated_log_prob, _ = self._compute_old_log_prob(
-                fresh_batch, temperature=prefix_temperature, calculate_entropy=False
+            has_fresh_rollout_old_log_probs = (
+                "hpf_follower_rollout_old_log_probs" in fresh_batch.batch
+                and "hpf_leader_rollout_old_log_probs" in fresh_batch.batch
             )
-            follower_updated_log_prob, _ = self._compute_old_log_prob(
-                fresh_batch, temperature=suffix_temperature, calculate_entropy=False
-            )
+            if has_fresh_rollout_old_log_probs:
+                leader_updated_log_prob = DataProto.from_single_dict(
+                    {"old_log_probs": fresh_batch.batch["hpf_leader_rollout_old_log_probs"]}
+                )
+                follower_updated_log_prob = DataProto.from_single_dict(
+                    {"old_log_probs": fresh_batch.batch["hpf_follower_rollout_old_log_probs"]}
+                )
+                print(
+                    "[HPF] fresh leader old_log_prob skipped "
+                    f"step={self.global_steps} source=tree_rollout_log_probs",
+                    flush=True,
+                )
+            else:
+                leader_updated_log_prob, _ = self._compute_old_log_prob(
+                    fresh_batch, temperature=prefix_temperature, calculate_entropy=False
+                )
+                follower_updated_log_prob, _ = self._compute_old_log_prob(
+                    fresh_batch, temperature=suffix_temperature, calculate_entropy=False
+                )
+                print(
+                    "[HPF] fresh leader old_log_prob recomputed "
+                    f"step={self.global_steps} source=actor_forward",
+                    flush=True,
+                )
             metrics["timing_s/hpf/fresh_leader_role_old_log_prob"] = float(time.perf_counter() - fresh_logprob_start)
+            metrics["hpf/fresh_leader_old_log_prob_skipped"] = float(has_fresh_rollout_old_log_probs)
             leader_batch = build_hpf_fresh_leader_batch(
                 batch=fresh_batch,
                 round_index=hpf_round_index,
