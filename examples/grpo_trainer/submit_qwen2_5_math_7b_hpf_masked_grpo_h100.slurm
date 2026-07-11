@@ -8,7 +8,7 @@
 #SBATCH --partition=acd_u
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=96
+#SBATCH --cpus-per-task=64
 #SBATCH --gres=gpu:8
 #SBATCH --mem=0
 #SBATCH --time=7-00:00:00
