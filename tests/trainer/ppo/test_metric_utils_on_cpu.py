@@ -568,6 +568,22 @@ class TestProcessValidationMetrics(unittest.TestCase):
         # For bootstrap with n=2, the majority vote could be either A or B
         # depending on the random sampling, so we don't check the exact value
 
+    def test_process_validation_metrics_with_none_predictions(self):
+        """Prediction metadata with invalid parses should not be averaged."""
+        data_sources = ["source1", "source1", "source1"]
+        sample_inputs = ["prompt1", "prompt1", "prompt1"]
+        infos_dict = {
+            "score": [-1.0, 1.0, -1.0],
+            "acc": [False, True, False],
+            "pred": [None, "42", None],
+        }
+
+        result = process_validation_metrics(data_sources, sample_inputs, infos_dict, seed=42)
+
+        self.assertNotIn("pred", result["source1"])
+        self.assertAlmostEqual(result["source1"]["acc"]["mean@3"], 1 / 3)
+        self.assertIn("maj@2/mean", result["source1"]["score"])
+
 
 if __name__ == "__main__":
     unittest.main()

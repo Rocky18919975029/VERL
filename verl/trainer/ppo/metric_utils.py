@@ -18,6 +18,7 @@ Metrics related to the PPO trainer.
 import logging
 from collections import defaultdict
 from functools import partial
+from numbers import Real
 from typing import Any, Callable
 
 import numpy as np
@@ -638,8 +639,9 @@ def process_validation_metrics(
             var_dict = uid_dict.setdefault(uid, {})
 
             for var_name, var_vals in var2vals.items():
-                # skip empty or string values
-                if not var_vals or isinstance(var_vals[0], str):
+                # Prediction metadata may contain strings or None. Keep it available
+                # for majority voting, but only aggregate numeric scalar metrics.
+                if not var_vals or not all(isinstance(value, (Real, np.bool_)) for value in var_vals):
                     continue
 
                 # compute mean and std
