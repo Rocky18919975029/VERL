@@ -54,6 +54,7 @@ ROLLOUT_VAL_TEMPERATURE=${ROLLOUT_VAL_TEMPERATURE:-1.0}
 ROLLOUT_VAL_TOP_P=${ROLLOUT_VAL_TOP_P:-0.7}
 ROLLOUT_VAL_N=${ROLLOUT_VAL_N:-1}
 ROLLOUT_SEED=${ROLLOUT_SEED:-42}
+REWARD_STRICT_BOX_VERIFY=${REWARD_STRICT_BOX_VERIFY:-True}
 
 ACTOR_PARAM_OFFLOAD=${ACTOR_PARAM_OFFLOAD:-False}
 ACTOR_OPTIMIZER_OFFLOAD=${ACTOR_OPTIMIZER_OFFLOAD:-False}
@@ -127,6 +128,11 @@ REF=(
     actor_rollout_ref.ref.fsdp_config.param_offload=${REF_PARAM_OFFLOAD}
 )
 
+REWARD=(
+    reward_model.reward_manager=dapo
+    +reward_model.reward_kwargs.strict_box_verify=${REWARD_STRICT_BOX_VERIFY}
+)
+
 RAY=(
     +ray_kwargs.ray_init.address=local
     +ray_kwargs.ray_init._temp_dir="${RAY_TMP_DIR:-/tmp/ray_${USER:-unknown}_${RUN_NAME}}"
@@ -184,6 +190,7 @@ python3 -m verl.trainer.main_ppo \
     "${ACTOR[@]}" \
     "${ROLLOUT[@]}" \
     "${REF[@]}" \
+    "${REWARD[@]}" \
     "${RAY[@]}" \
     "${TRAINER[@]}" \
     "$@"
