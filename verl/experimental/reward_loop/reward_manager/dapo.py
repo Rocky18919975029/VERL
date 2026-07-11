@@ -42,6 +42,7 @@ class DAPORewardManager(RewardManagerBase):
         self.strict_box_verify = _as_bool(config.reward.get("reward_kwargs", {}).get("strict_box_verify", False))
         self.reward_router_address = reward_router_address
         self.reward_model_tokenizer = reward_model_tokenizer
+        print(f"[DAPORewardManager] strict_box_verify={self.strict_box_verify}", flush=True)
 
         if self.overlong_buffer_cfg is not None and self.overlong_buffer_cfg.enable:
             assert self.max_resp_len is not None, (
