@@ -147,6 +147,9 @@ echo "HPF tree num suffixes: ${HPF_TREE_NUM_SUFFIXES:-2}"
 echo "HPF fresh tree num prefixes: ${HPF_FRESH_TREE_NUM_PREFIXES:-${HPF_TREE_NUM_PREFIXES:-4}}"
 echo "HPF fresh tree num suffixes: ${HPF_FRESH_TREE_NUM_SUFFIXES:-${HPF_TREE_NUM_SUFFIXES:-2}}"
 echo "HPF fresh leader tree: ${HPF_FRESH_LEADER_TREE:-False}"
+echo "HPF role-phased training: ${HPF_ROLE_PHASED_TRAINING:-False}"
+echo "HPF follower phase epochs: ${HPF_FOLLOWER_PHASE_EPOCHS:-1}"
+echo "HPF leader phase epochs: ${HPF_LEADER_PHASE_EPOCHS:-1}"
 
 ACTOR_PARAM_OFFLOAD=${ACTOR_PARAM_OFFLOAD:-True}
 ACTOR_OPTIMIZER_OFFLOAD=${ACTOR_OPTIMIZER_OFFLOAD:-True}

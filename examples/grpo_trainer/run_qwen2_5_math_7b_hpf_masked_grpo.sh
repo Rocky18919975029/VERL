@@ -22,6 +22,9 @@ HPF_CORRECTION_CLIP=${HPF_CORRECTION_CLIP:-5.0}
 HPF_FRESH_LEADER_TREE=${HPF_FRESH_LEADER_TREE:-False}
 HPF_LOCAL_UPDATE_WINDOW=${HPF_LOCAL_UPDATE_WINDOW:-False}
 HPF_LOCAL_UPDATE_WINDOW_SIZE=${HPF_LOCAL_UPDATE_WINDOW_SIZE:-null}
+HPF_ROLE_PHASED_TRAINING=${HPF_ROLE_PHASED_TRAINING:-False}
+HPF_FOLLOWER_PHASE_EPOCHS=${HPF_FOLLOWER_PHASE_EPOCHS:-1}
+HPF_LEADER_PHASE_EPOCHS=${HPF_LEADER_PHASE_EPOCHS:-1}
 HPF_PROGRESS_LOG_INTERVAL=${HPF_PROGRESS_LOG_INTERVAL:-1}
 HPF_TREE_ROLLOUT=${HPF_TREE_ROLLOUT:-False}
 HPF_TREE_NUM_PREFIXES=${HPF_TREE_NUM_PREFIXES:-4}
@@ -33,6 +36,28 @@ HPF_TREE_SUFFIX_TOP_P=${HPF_TREE_SUFFIX_TOP_P:-1.0}
 HPF_FRESH_TREE_NUM_PREFIXES=${HPF_FRESH_TREE_NUM_PREFIXES:-${HPF_TREE_NUM_PREFIXES}}
 HPF_FRESH_TREE_NUM_SUFFIXES=${HPF_FRESH_TREE_NUM_SUFFIXES:-${HPF_TREE_NUM_SUFFIXES}}
 HPF_LOSS_AGG_MODE=${HPF_LOSS_AGG_MODE:-token-mean}
+
+if [ "${HPF_ROLE_PHASED_TRAINING}" = "True" ] || [ "${HPF_ROLE_PHASED_TRAINING}" = "true" ] \
+    || [ "${HPF_ROLE_PHASED_TRAINING}" = "1" ]; then
+    if [ "${HPF_FRESH_LEADER_TREE}" != "True" ] && [ "${HPF_FRESH_LEADER_TREE}" != "true" ] \
+        && [ "${HPF_FRESH_LEADER_TREE}" != "1" ]; then
+        echo "HPF role-phased training requires HPF_FRESH_LEADER_TREE=True." >&2
+        exit 1
+    fi
+    if [ "${HPF_TREE_ROLLOUT}" != "True" ] && [ "${HPF_TREE_ROLLOUT}" != "true" ] \
+        && [ "${HPF_TREE_ROLLOUT}" != "1" ]; then
+        echo "HPF role-phased training requires HPF_TREE_ROLLOUT=True." >&2
+        exit 1
+    fi
+    if [ "${HPF_HORIZON_SCHEDULE}" != "epoch" ]; then
+        echo "HPF role-phased training requires HPF_HORIZON_SCHEDULE=epoch." >&2
+        exit 1
+    fi
+    if [ "${HPF_FOLLOWER_PHASE_EPOCHS}" -le 0 ] || [ "${HPF_LEADER_PHASE_EPOCHS}" -le 0 ]; then
+        echo "HPF follower and leader phase epochs must both be positive." >&2
+        exit 1
+    fi
+fi
 
 # A suffix KL to theta_F is exactly zero on the first leader optimizer step.
 # Keep at least two mini-batches per HPF phase by default so the second and
@@ -75,6 +100,9 @@ HPF_ARGS=(
     +algorithm.hpf_rlvr.fresh_leader_tree="${HPF_FRESH_LEADER_TREE}"
     algorithm.hpf_rlvr.local_update_window.enable="${HPF_LOCAL_UPDATE_WINDOW}"
     algorithm.hpf_rlvr.local_update_window.size="${HPF_LOCAL_UPDATE_WINDOW_SIZE}"
+    algorithm.hpf_rlvr.role_phased_training.enable="${HPF_ROLE_PHASED_TRAINING}"
+    algorithm.hpf_rlvr.role_phased_training.follower_epochs="${HPF_FOLLOWER_PHASE_EPOCHS}"
+    algorithm.hpf_rlvr.role_phased_training.leader_epochs="${HPF_LEADER_PHASE_EPOCHS}"
     algorithm.hpf_rlvr.progress_log_interval="${HPF_PROGRESS_LOG_INTERVAL}"
     actor_rollout_ref.actor.loss_agg_mode="${HPF_LOSS_AGG_MODE}"
 )

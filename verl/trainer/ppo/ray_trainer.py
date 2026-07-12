@@ -48,6 +48,7 @@ from verl.trainer.ppo.hpf_utils import (
     build_hpf_fresh_leader_batch,
     build_hpf_masked_batches,
 )
+from verl.trainer.ppo.hpf_schedule import get_hpf_role_phase
 from verl.trainer.ppo.metric_utils import (
     compute_data_metrics,
     compute_throughout_metrics,
@@ -440,6 +441,35 @@ class RayPPOTrainer:
         )
 
         total_training_steps = len(self.train_dataloader) * self.config.trainer.total_epochs
+        hpf_config = self.config.algorithm.get("hpf_rlvr", {})
+        role_phased_config = hpf_config.get("role_phased_training", {})
+        role_phased_training = self._parse_hpf_bool(role_phased_config.get("enable", False), False)
+        if role_phased_training:
+            follower_epochs = int(role_phased_config.get("follower_epochs", 1))
+            leader_epochs = int(role_phased_config.get("leader_epochs", 1))
+            if follower_epochs <= 0 or leader_epochs <= 0:
+                raise ValueError(
+                    "hpf_rlvr.role_phased_training follower_epochs and leader_epochs must both be positive; "
+                    f"got follower_epochs={follower_epochs}, leader_epochs={leader_epochs}."
+                )
+            tree_config = hpf_config.get("tree_rollout", {})
+            if not self._parse_hpf_bool(hpf_config.get("enable", False), False) or not self._parse_hpf_bool(
+                tree_config.get("enable", False), False
+            ):
+                raise ValueError("HPF role-phased training requires HPF and tree rollout to be enabled.")
+            if not self._parse_hpf_bool(hpf_config.get("fresh_leader_tree", False), False):
+                raise ValueError("HPF role-phased training requires hpf_rlvr.fresh_leader_tree=True.")
+            if str(hpf_config.get("horizon_schedule", "epoch")).lower() != "epoch":
+                raise ValueError("HPF role-phased training requires hpf_rlvr.horizon_schedule='epoch'.")
+            phase_batch_size = int(self.config.data.get("gen_batch_size", self.config.data.train_batch_size))
+            dropped_examples = len(self.train_dataset) % phase_batch_size
+            if dropped_examples:
+                raise ValueError(
+                    "HPF role-phased training requires complete train-set passes, but the dataset size is not "
+                    f"divisible by the dataloader batch size: dataset={len(self.train_dataset)}, "
+                    f"batch_size={phase_batch_size}, remainder={dropped_examples}."
+                )
+            total_training_steps *= follower_epochs + leader_epochs
 
         if self.config.trainer.total_training_steps is not None:
             total_training_steps = self.config.trainer.total_training_steps
@@ -1055,6 +1085,19 @@ class RayPPOTrainer:
         dataloader_state_dict = self.train_dataloader.state_dict()
         torch.save(dataloader_state_dict, dataloader_local_path)
 
+        hpf_config = self.config.algorithm.get("hpf_rlvr", {})
+        phased_config = hpf_config.get("role_phased_training", {})
+        if self._parse_hpf_bool(phased_config.get("enable", False), False):
+            torch.save(
+                {
+                    "enabled": True,
+                    "follower_epochs": int(phased_config.get("follower_epochs", 1)),
+                    "leader_epochs": int(phased_config.get("leader_epochs", 1)),
+                    "batches_per_pass": len(self.train_dataloader),
+                },
+                os.path.join(local_global_step_folder, "hpf_role_phase.pt"),
+            )
+
         # latest checkpointed iteration tracker (for atomic usage)
         if (
             hasattr(self.config.actor_rollout_ref.actor.checkpoint, "async_save")
@@ -1106,6 +1149,28 @@ class RayPPOTrainer:
 
         print(f"Setting global step to {self.global_steps}")
         print(f"Resuming from {global_step_folder}")
+
+        hpf_config = self.config.algorithm.get("hpf_rlvr", {})
+        phased_config = hpf_config.get("role_phased_training", {})
+        if self._parse_hpf_bool(phased_config.get("enable", False), False):
+            phase_state_path = os.path.join(global_step_folder, "hpf_role_phase.pt")
+            if not os.path.exists(phase_state_path):
+                raise ValueError(
+                    "Cannot resume HPF role-phased training from a checkpoint without hpf_role_phase.pt. "
+                    "Use a checkpoint created by the same role-phased mode."
+                )
+            phase_state = torch.load(phase_state_path, weights_only=False)
+            expected_phase_state = {
+                "enabled": True,
+                "follower_epochs": int(phased_config.get("follower_epochs", 1)),
+                "leader_epochs": int(phased_config.get("leader_epochs", 1)),
+                "batches_per_pass": len(self.train_dataloader),
+            }
+            if phase_state != expected_phase_state:
+                raise ValueError(
+                    "HPF role-phased resume configuration does not match the checkpoint: "
+                    f"checkpoint={phase_state}, current={expected_phase_state}."
+                )
 
         actor_path = os.path.join(global_step_folder, "actor")
         critic_path = os.path.join(global_step_folder, str(Role.Critic))
@@ -1434,6 +1499,26 @@ class RayPPOTrainer:
             return max((self.global_steps - 1) // interval + 1, 1)
         raise ValueError(f"Unsupported HPF horizon_schedule={schedule!r}; expected 'epoch' or 'step'")
 
+    def _get_hpf_role_phase(self, physical_epoch: int) -> tuple[str | None, int | None, int | None]:
+        """Return role, role-local epoch, and fixed-horizon round for a dataloader pass."""
+        hpf_config = self.config.algorithm.get("hpf_rlvr", {})
+        phased_config = hpf_config.get("role_phased_training", {})
+        if not self._parse_hpf_bool(phased_config.get("enable", False), False):
+            return None, None, None
+        if not self._parse_hpf_bool(hpf_config.get("fresh_leader_tree", False), False):
+            raise ValueError("HPF role-phased training requires hpf_rlvr.fresh_leader_tree=True.")
+        if str(hpf_config.get("horizon_schedule", "epoch")).lower() != "epoch":
+            raise ValueError("HPF role-phased training requires hpf_rlvr.horizon_schedule='epoch'.")
+
+        follower_epochs = int(phased_config.get("follower_epochs", 1))
+        leader_epochs = int(phased_config.get("leader_epochs", 1))
+        if follower_epochs <= 0 or leader_epochs <= 0:
+            raise ValueError(
+                "hpf_rlvr.role_phased_training follower_epochs and leader_epochs must both be positive; "
+                f"got follower_epochs={follower_epochs}, leader_epochs={leader_epochs}."
+            )
+        return get_hpf_role_phase(int(physical_epoch), follower_epochs, leader_epochs)
+
     @staticmethod
     def _compute_hpf_suffix_correction(
         *,
@@ -1597,9 +1682,13 @@ class RayPPOTrainer:
         hpf_round_index: int | None = None,
         prompt_batch: DataProto | None = None,
         gen_batch: DataProto | None = None,
+        role_phase: str = "both",
+        role_responses_per_prompt: int | None = None,
     ) -> DataProto:
         hpf_update_start = time.perf_counter()
         hpf_config = self.config.algorithm.get("hpf_rlvr", {})
+        if role_phase not in {"both", "follower", "leader"}:
+            raise ValueError(f"Unsupported HPF role phase: {role_phase!r}")
         progressive_block_size = int(hpf_config.get("progressive_block_size", 256))
         max_response_length = int(hpf_config.get("max_response_length", self.config.data.max_response_length))
         epsilon = float(hpf_config.get("epsilon", 1e-6))
@@ -1679,17 +1768,31 @@ class RayPPOTrainer:
         role_old_log_elapsed = time.perf_counter() - old_log_start
         if hpf_round_index is None:
             hpf_round_index = self._get_hpf_round_index(None)
-        follower_batch, leader_batch = build_hpf_masked_batches(
-            batch=batch,
-            round_index=hpf_round_index,
-            progressive_block_size=progressive_block_size,
-            max_response_length=max_response_length,
-            epsilon=epsilon,
-            std_normalize=std_normalize,
-            follower_old_log_probs=follower_old_log_prob.batch["old_log_probs"],
-            leader_old_log_probs=leader_old_log_prob.batch["old_log_probs"],
-        )
+        if role_phase == "leader":
+            follower_batch = None
+            leader_batch = build_hpf_fresh_leader_batch(
+                batch=batch,
+                round_index=hpf_round_index,
+                progressive_block_size=progressive_block_size,
+                max_response_length=max_response_length,
+                epsilon=epsilon,
+                std_normalize=std_normalize,
+                leader_old_log_probs=leader_old_log_prob.batch["old_log_probs"],
+            )
+        else:
+            follower_batch, leader_batch = build_hpf_masked_batches(
+                batch=batch,
+                round_index=hpf_round_index,
+                progressive_block_size=progressive_block_size,
+                max_response_length=max_response_length,
+                epsilon=epsilon,
+                std_normalize=std_normalize,
+                follower_old_log_probs=follower_old_log_prob.batch["old_log_probs"],
+                leader_old_log_probs=leader_old_log_prob.batch["old_log_probs"],
+            )
         metrics = dict(leader_batch.metrics)
+        metrics["hpf/role_phase_follower"] = float(role_phase == "follower")
+        metrics["hpf/role_phase_leader"] = float(role_phase == "leader")
         metrics["hpf/prefix_loss_temperature"] = prefix_temperature
         metrics["hpf/suffix_loss_temperature"] = suffix_temperature
         metrics["timing_s/hpf/role_old_log_prob"] = float(role_old_log_elapsed)
@@ -1700,7 +1803,7 @@ class RayPPOTrainer:
         metrics["hpf/fresh_leader_tree_enabled"] = float(fresh_leader_tree)
         metrics["hpf/local_update_window_enabled"] = float(local_update_window)
         metrics["hpf/local_update_window_size"] = float(local_window_size)
-        if follower_batch is not None:
+        if follower_batch is not None and role_phase in {"both", "follower"}:
             follower_mini_batch_size = (
                 self.config.actor_rollout_ref.actor.ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
             )
@@ -1753,9 +1856,13 @@ class RayPPOTrainer:
             metrics.update(rename_dict(follower_metrics, "hpf/follower/"))
             metrics.update(follower_batch.metrics)
 
+        if role_phase == "follower":
+            metrics["timing_s/hpf/update_actor_total"] = float(time.perf_counter() - hpf_update_start)
+            return DataProto.from_single_dict(data={}, meta_info={"metrics": metrics})
+
         follower_updated_log_prob = follower_old_log_prob
         leader_updated_log_prob = leader_old_log_prob
-        if fresh_leader_tree:
+        if fresh_leader_tree and role_phase == "both":
             if prompt_batch is None or gen_batch is None:
                 raise ValueError("HPF fresh leader tree requires prompt_batch and gen_batch.")
             fresh_start = time.perf_counter()
@@ -1888,7 +1995,7 @@ class RayPPOTrainer:
             metrics["timing_s/hpf/suffix_correction_log_prob"] = metrics["timing_s/hpf/correction_log_prob"]
             metrics["timing_s/hpf/prefix_correction_log_prob"] = metrics["timing_s/hpf/correction_log_prob"]
 
-        if suffix_kl_coef > 0 and leader_batch.suffix_mask is not None and follower_batch is not None:
+        if suffix_kl_coef > 0 and leader_batch.suffix_mask is not None:
             suffix_ref_log_prob = follower_updated_log_prob.batch["old_log_probs"]
             leader_batch.batch.batch["hpf_kl_ref_log_prob"] = suffix_ref_log_prob.to(
                 device=leader_batch.batch.batch["response_mask"].device, dtype=torch.float32
@@ -1916,7 +2023,12 @@ class RayPPOTrainer:
             kl_temperature=suffix_temperature,
         )
         leader_mini_batch_size = (
-            self.config.actor_rollout_ref.actor.ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
+            self.config.actor_rollout_ref.actor.ppo_mini_batch_size
+            * (
+                int(role_responses_per_prompt)
+                if role_phase == "leader" and role_responses_per_prompt is not None
+                else self.config.actor_rollout_ref.rollout.n
+            )
         )
         leader_phase_batch, leader_pad_size = pad_dataproto_to_divisor(leader_phase_batch, leader_mini_batch_size)
         metrics["hpf/leader_pad_size"] = float(leader_pad_size)
@@ -2273,6 +2385,24 @@ class RayPPOTrainer:
         self.checkpoint_manager.update_weights(self.global_steps)
 
         current_epoch = self.global_steps // len(self.train_dataloader)
+        hpf_config = self.config.algorithm.get("hpf_rlvr", {})
+        role_phased_config = hpf_config.get("role_phased_training", {})
+        role_phased_training = self._parse_hpf_bool(role_phased_config.get("enable", False), False)
+        physical_total_epochs = int(self.config.trainer.total_epochs)
+        if role_phased_training:
+            follower_phase_epochs = int(role_phased_config.get("follower_epochs", 1))
+            leader_phase_epochs = int(role_phased_config.get("leader_epochs", 1))
+            physical_total_epochs *= follower_phase_epochs + leader_phase_epochs
+            physical_total_epochs = max(
+                physical_total_epochs,
+                math.ceil(self.total_training_steps / len(self.train_dataloader)),
+            )
+            print(
+                "[HPF] role-phased training enabled "
+                f"follower_epochs={follower_phase_epochs} leader_epochs={leader_phase_epochs} "
+                f"batches_per_pass={len(self.train_dataloader)} physical_total_epochs={physical_total_epochs}",
+                flush=True,
+            )
 
         SkipManager.init(self.config)
 
@@ -2306,7 +2436,15 @@ class RayPPOTrainer:
         )
         next_step_profile = False
 
-        for epoch in range(current_epoch, self.config.trainer.total_epochs):
+        for epoch in range(current_epoch, physical_total_epochs):
+            role_phase, role_epoch, role_round_index = self._get_hpf_role_phase(epoch)
+            if role_phase is not None:
+                print(
+                    "[HPF] role phase start "
+                    f"round={role_round_index} role={role_phase} role_epoch={role_epoch} "
+                    f"physical_epoch={epoch + 1}",
+                    flush=True,
+                )
             for batch_dict in self._iterate_train_dataloader():
                 if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
                     self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=False)
@@ -2333,7 +2471,32 @@ class RayPPOTrainer:
                 gen_batch.meta_info["global_steps"] = self.global_steps
                 rollout_n = self.config.actor_rollout_ref.rollout.n
                 use_hpf_tree_rollout = self._hpf_tree_rollout_enabled()
-                hpf_round_index = self._get_hpf_round_index(epoch) if use_hpf_tree_rollout else None
+                hpf_round_index = (
+                    role_round_index
+                    if use_hpf_tree_rollout and role_round_index is not None
+                    else self._get_hpf_round_index(epoch)
+                    if use_hpf_tree_rollout
+                    else None
+                )
+                effective_rollout_n = rollout_n
+                fresh_num_prefixes = None
+                fresh_num_suffixes = None
+                if use_hpf_tree_rollout and role_phase == "leader":
+                    tree_config = hpf_config.get("tree_rollout", {})
+                    fresh_tree_config = hpf_config.get("fresh_tree_rollout", {})
+                    fresh_num_prefixes_value = fresh_tree_config.get("num_prefixes", None)
+                    fresh_num_suffixes_value = fresh_tree_config.get("num_suffixes", None)
+                    fresh_num_prefixes = int(
+                        tree_config.get("num_prefixes", 4)
+                        if fresh_num_prefixes_value is None
+                        else fresh_num_prefixes_value
+                    )
+                    fresh_num_suffixes = int(
+                        tree_config.get("num_suffixes", 2)
+                        if fresh_num_suffixes_value is None
+                        else fresh_num_suffixes_value
+                    )
+                    effective_rollout_n = fresh_num_prefixes * fresh_num_suffixes
                 gen_batch_output = gen_batch.repeat(repeat_times=rollout_n, interleave=True)
 
                 if use_hpf_tree_rollout:
@@ -2361,7 +2524,11 @@ class RayPPOTrainer:
                             self.llm_server_manager.start_profile()
                         if use_hpf_tree_rollout:
                             gen_batch_output, hpf_tree_metrics = self._generate_hpf_tree_sequences(
-                                gen_batch, hpf_round_index=hpf_round_index
+                                gen_batch,
+                                hpf_round_index=hpf_round_index,
+                                num_prefixes=fresh_num_prefixes,
+                                num_suffixes=fresh_num_suffixes,
+                                require_rollout_n_match=role_phase != "leader",
                             )
                             metrics.update(hpf_tree_metrics)
                             timing_raw.update(gen_batch_output.meta_info["timing"])
@@ -2400,7 +2567,7 @@ class RayPPOTrainer:
                         del combined_gen_batch, combined_gen_output
                     # repeat to align with repeated responses in rollout
                     prompt_batch_for_hpf = batch
-                    batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+                    batch = batch.repeat(repeat_times=effective_rollout_n, interleave=True)
                     batch = batch.union(gen_batch_output)
 
                     if "response_mask" not in batch.batch.keys():
@@ -2573,6 +2740,8 @@ class RayPPOTrainer:
                                     hpf_round_index=hpf_round_index,
                                     prompt_batch=prompt_batch_for_hpf,
                                     gen_batch=gen_batch,
+                                    role_phase=role_phase or "both",
+                                    role_responses_per_prompt=effective_rollout_n,
                                 )
                             else:
                                 actor_output = self._update_actor(batch)
@@ -2645,6 +2814,16 @@ class RayPPOTrainer:
                         "training/epoch": epoch,
                     }
                 )
+                if role_phase is not None:
+                    metrics.update(
+                        {
+                            "hpf/role_phased_training_enabled": 1.0,
+                            "hpf/role_phase_follower": float(role_phase == "follower"),
+                            "hpf/role_phase_leader": float(role_phase == "leader"),
+                            "hpf/role_phase_epoch": float(role_epoch),
+                            "hpf/role_phase_round": float(role_round_index),
+                        }
+                    )
                 if self.config.algorithm.get("hpf_rlvr", {}).get("enable", False) and "advantages" not in batch.batch:
                     metrics["hpf/metrics_placeholder_advantages"] = 1.0
                     batch.batch["advantages"] = torch.zeros_like(batch.batch["response_mask"], dtype=torch.float32)

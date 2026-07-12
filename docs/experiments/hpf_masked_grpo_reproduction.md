@@ -406,6 +406,55 @@ global_step_<N>/actor/huggingface/
 latest_checkpointed_iteration.txt
 ```
 
+## Optional Full-Dataset Role Phases
+
+The default Alg3 schedule updates follower and leader back-to-back for every
+prompt batch. Set `HPF_ROLE_PHASED_TRAINING=True` to keep a fixed horizon while
+the follower and leader each make complete train-set passes:
+
+```text
+for each horizon round:
+    train follower over the full train set for m epochs
+    train leader over the full train set for n epochs
+    advance the horizon
+```
+
+Configure `m` and `n` with:
+
+```bash
+HPF_FOLLOWER_PHASE_EPOCHS=1
+HPF_LEADER_PHASE_EPOCHS=1
+```
+
+Both default to one. This mode requires tree rollout, fresh Alg3 leader rollout,
+an epoch-based horizon schedule, and a filtered train-set size divisible by the
+dataloader batch size. These constraints are checked before GPU training starts.
+
+`TOTAL_TRAINING_STEPS` counts role-specific prompt batches. For `R` horizon
+rounds, use:
+
+```text
+TOTAL_TRAINING_STEPS = R * (m + n) * batches_per_train_set_pass
+```
+
+For example, 1536 filtered prompts with batch size 512 produce three batches
+per pass. With `m=n=1`, one horizon round is six global steps: follower steps
+1-3 followed by leader steps 4-6. The next round starts at step 7 with the next
+horizon.
+
+Checkpoint resume uses the existing stateful dataloader. The role and horizon
+are reconstructed from the completed global steps, so a checkpoint at step 3
+resumes at the first leader batch, while a checkpoint inside a role pass resumes
+at the next unconsumed batch. Phase identity is logged through:
+
+```text
+hpf/role_phased_training_enabled
+hpf/role_phase_follower
+hpf/role_phase_leader
+hpf/role_phase_epoch
+hpf/role_phase_round
+```
+
 ## Notes
 
 - This HPF path should not modify the GRPO baseline reproduction script beyond

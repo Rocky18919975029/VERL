@@ -161,6 +161,22 @@ algorithm:
       # use progressive_block_size.
       size: null
 
+    # Train each HPF role over complete dataloader passes instead of updating
+    # follower and leader back-to-back for every prompt batch. Disabled by
+    # default to preserve the existing Alg3 training schedule.
+    role_phased_training:
+
+      # Whether to use full-dataset follower/leader phases.
+      enable: False
+
+      # Number of complete train-set passes assigned to the follower in each
+      # fixed-horizon round.
+      follower_epochs: 1
+
+      # Number of complete train-set passes assigned to the leader in each
+      # fixed-horizon round.
+      leader_epochs: 1
+
     # Two-stage prefix-follower rollout construction. Disabled by default so
     # existing GRPO and masked HPF smoke paths remain unchanged.
     tree_rollout:
