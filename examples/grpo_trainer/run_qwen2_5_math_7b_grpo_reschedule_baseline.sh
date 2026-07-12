@@ -147,7 +147,6 @@ TRAINER_COMMON=(
     trainer.n_gpus_per_node=${NGPUS_PER_NODE}
     trainer.nnodes=${NNODES}
     trainer.critic_warmup=0
-    trainer.val_before_train=False
     trainer.save_freq=${SAVE_FREQ:-10}
     trainer.test_freq=${TEST_FREQ:-1}
     trainer.total_epochs=${TOTAL_EPOCHS}
@@ -163,6 +162,7 @@ case "${MODE}" in
         DATA=( "${COMMON_DATA[@]}" data.val_files="${TRAIN_VAL_FILES}" )
         TRAINER=(
             "${TRAINER_COMMON[@]}"
+            trainer.val_before_train=False
             trainer.total_training_steps=${TOTAL_TRAINING_STEPS}
             trainer.rollout_data_dir="${ROLLOUT_DATA_DIR:-./rollout_data/${PROJECT_NAME}/${RUN_NAME}}"
         )
@@ -176,6 +176,7 @@ case "${MODE}" in
         DATA=( "${COMMON_DATA[@]}" data.val_files="${VAL_FILES}" )
         TRAINER=(
             "${TRAINER_COMMON[@]}"
+            trainer.val_before_train=True
             trainer.val_only=True
             trainer.rollout_data_dir="${ROLLOUT_DATA_DIR:-./rollout_data/${PROJECT_NAME}/${RUN_NAME}_eval}"
         )
