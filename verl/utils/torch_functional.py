@@ -263,6 +263,27 @@ def entropy_from_logits_with_chunking(logits: torch.Tensor, chunk_size: int = 20
     return entropy
 
 
+def temperature_policy_kl_from_logits(
+    logits: torch.Tensor,
+    low_temperature: float,
+    high_temperature: float,
+) -> torch.Tensor:
+    """Compute ``KL(softmax(z/T_low) || softmax(z/T_high))`` per token."""
+    if low_temperature <= 0 or high_temperature <= 0:
+        raise ValueError(
+            f"Temperatures must be positive, got low={low_temperature}, high={high_temperature}."
+        )
+
+    logits_fp32 = logits.float()
+    low_scaled = logits_fp32 / float(low_temperature)
+    low_log_normalizer = torch.logsumexp(low_scaled, dim=-1)
+    high_log_normalizer = torch.logsumexp(logits_fp32 / float(high_temperature), dim=-1)
+    low_probs = torch.softmax(low_scaled, dim=-1)
+    expected_logits = torch.sum(low_probs * logits_fp32, dim=-1)
+    inverse_temperature_delta = 1.0 / float(low_temperature) - 1.0 / float(high_temperature)
+    return inverse_temperature_delta * expected_logits + high_log_normalizer - low_log_normalizer
+
+
 def masked_sum(values: torch.Tensor, mask: torch.Tensor, axis: int | tuple[int, ...] | None = None) -> torch.Tensor:
     """Compute sum of tensor values where mask is True.
 

@@ -478,6 +478,19 @@ class RayPPOTrainer:
                     "HPF mixed-policy GRPO defines its own prefix-plus-suffix window; "
                     "disable local_update_window."
                 )
+            bridge_kl_coef = float(mixed_policy_config.get("bridge_kl_coef", 0.0))
+            bridge_window_size = int(mixed_policy_config.get("bridge_window_size", 64))
+            bridge_kl_chunk_size = int(mixed_policy_config.get("bridge_kl_chunk_size", 32))
+            if bridge_kl_coef < 0:
+                raise ValueError("mixed_policy_grpo.bridge_kl_coef must be nonnegative.")
+            if bridge_kl_coef > 0 and bridge_window_size <= 0:
+                raise ValueError(
+                    "mixed_policy_grpo.bridge_window_size must be positive when bridge KL is enabled."
+                )
+            if bridge_kl_coef > 0 and bridge_kl_chunk_size <= 0:
+                raise ValueError(
+                    "mixed_policy_grpo.bridge_kl_chunk_size must be positive when bridge KL is enabled."
+                )
         if role_phased_training:
             follower_epochs = int(role_phased_config.get("follower_epochs", 1))
             leader_epochs = int(role_phased_config.get("leader_epochs", 1))
@@ -1623,6 +1636,7 @@ class RayPPOTrainer:
             "hpf_pg_mask",
             "hpf_kl_mask",
             "hpf_kl_ref_log_prob",
+            "hpf_bridge_kl_mask",
             "ref_log_prob",
             "rollout_log_probs",
             "token_level_scores",
@@ -1730,6 +1744,15 @@ class RayPPOTrainer:
         full_suffix_tail = self._parse_hpf_bool(
             hpf_config.get("mixed_policy_grpo", {}).get("full_suffix_tail", False), False
         )
+        bridge_kl_coef = float(hpf_config.get("mixed_policy_grpo", {}).get("bridge_kl_coef", 0.0))
+        bridge_window_size = int(hpf_config.get("mixed_policy_grpo", {}).get("bridge_window_size", 64))
+        bridge_kl_chunk_size = int(hpf_config.get("mixed_policy_grpo", {}).get("bridge_kl_chunk_size", 32))
+        if bridge_kl_coef < 0:
+            raise ValueError(f"mixed_policy_grpo.bridge_kl_coef must be nonnegative, got {bridge_kl_coef}.")
+        if bridge_kl_coef > 0 and bridge_window_size <= 0:
+            raise ValueError(
+                "mixed_policy_grpo.bridge_window_size must be positive when bridge KL is enabled."
+            )
         if hpf_round_index is None:
             hpf_round_index = self._get_hpf_round_index(None)
         if (
@@ -1746,6 +1769,7 @@ class RayPPOTrainer:
             leader_old_log_probs=batch.batch["hpf_leader_rollout_old_log_probs"],
             follower_old_log_probs=batch.batch["hpf_follower_rollout_old_log_probs"],
             full_suffix_tail=full_suffix_tail,
+            bridge_window_size=bridge_window_size if bridge_kl_coef > 0 else 0,
         )
         update_batch = mixed.batch
         tree_log_prob_keys = [
@@ -1760,7 +1784,9 @@ class RayPPOTrainer:
         if full_suffix_tail:
             update_length = int(update_batch.batch["response_mask"].sum(dim=-1).max().item())
         else:
-            update_length = 2 * horizon
+            pg_update_length = 2 * horizon
+            bridge_update_length = horizon + bridge_window_size if bridge_kl_coef > 0 else 0
+            update_length = max(pg_update_length, bridge_update_length)
         response_len_after = self._truncate_hpf_update_batch_response(update_batch, update_length)
 
         response_mask = update_batch.batch["response_mask"]
@@ -1775,6 +1801,11 @@ class RayPPOTrainer:
         )
         update_batch.batch["temperature"] = temperature
         update_batch.meta_info.pop("temperature", None)
+        if bridge_kl_coef > 0:
+            update_batch.meta_info["hpf_bridge_kl_coef"] = bridge_kl_coef
+            update_batch.meta_info["hpf_bridge_low_temperature"] = suffix_temperature
+            update_batch.meta_info["hpf_bridge_high_temperature"] = prefix_temperature
+            update_batch.meta_info["hpf_bridge_kl_chunk_size"] = bridge_kl_chunk_size
 
         mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size * int(
             self.config.actor_rollout_ref.rollout.n
@@ -1786,6 +1817,8 @@ class RayPPOTrainer:
                 "hpf/mixed_policy_grpo_prefix_temperature": prefix_temperature,
                 "hpf/mixed_policy_grpo_suffix_temperature": suffix_temperature,
                 "hpf/mixed_policy_grpo_full_suffix_tail": float(full_suffix_tail),
+                "hpf/mixed_policy_grpo_bridge_kl_coef": bridge_kl_coef,
+                "hpf/mixed_policy_grpo_bridge_window_size": float(bridge_window_size),
                 "hpf/mixed_policy_grpo_response_len_before": float(response_len_before),
                 "hpf/mixed_policy_grpo_response_len_after": float(response_len_after),
                 "hpf/mixed_policy_grpo_pad_size": float(pad_size),
@@ -1800,6 +1833,7 @@ class RayPPOTrainer:
             f"step={self.global_steps} batch={len(update_batch)} pad={pad_size} horizon={horizon} "
             f"response_len={response_len_before}->{response_len_after} "
             f"full_suffix_tail={full_suffix_tail} "
+            f"bridge_kl_coef={bridge_kl_coef} bridge_window={bridge_window_size} "
             f"prefix_temp={prefix_temperature} suffix_temp={suffix_temperature}",
             flush=True,
         )

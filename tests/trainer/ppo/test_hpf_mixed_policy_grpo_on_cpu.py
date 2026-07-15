@@ -11,6 +11,7 @@ import torch
 
 from verl import DataProto
 from verl.trainer.ppo.hpf_utils import build_hpf_mixed_policy_grpo_batch
+from verl.utils.torch_functional import temperature_policy_kl_from_logits
 
 
 def test_mixed_policy_grpo_uses_prefix_and_one_horizon_suffix_window():
@@ -111,3 +112,48 @@ def test_mixed_policy_grpo_can_train_the_full_suffix_tail():
     assert torch.equal(mixed.batch.batch["hpf_pg_mask"].bool(), expected_update)
     assert torch.equal(mixed.batch.batch["advantages"], advantages * expected_update)
     assert mixed.metrics["hpf/mixed_policy_grpo_full_suffix_tail"] == 1.0
+
+
+def test_mixed_policy_bridge_window_is_independent_of_pg_suffix_window():
+    response_mask = torch.ones(1, 8, dtype=torch.long)
+    advantages = torch.ones(1, 8)
+    batch = DataProto.from_single_dict(
+        {
+            "response_mask": response_mask,
+            "advantages": advantages,
+            "returns": advantages.clone(),
+        }
+    )
+    log_probs = torch.zeros(1, 8)
+
+    mixed = build_hpf_mixed_policy_grpo_batch(
+        batch=batch,
+        round_index=1,
+        progressive_block_size=2,
+        max_response_length=8,
+        leader_old_log_probs=log_probs,
+        follower_old_log_probs=log_probs,
+        bridge_window_size=4,
+    )
+
+    expected_pg = torch.tensor([[1, 1, 1, 1, 0, 0, 0, 0]], dtype=torch.bool)
+    expected_bridge = torch.tensor([[0, 0, 1, 1, 1, 1, 0, 0]], dtype=torch.bool)
+    assert torch.equal(mixed.batch.batch["hpf_pg_mask"].bool(), expected_pg)
+    assert torch.equal(mixed.batch.batch["hpf_bridge_kl_mask"].bool(), expected_bridge)
+    assert torch.equal(mixed.bridge_mask.bool(), expected_bridge)
+
+
+def test_temperature_policy_kl_matches_direct_distribution_computation():
+    logits = torch.tensor([[1.0, -0.5, 0.25], [0.2, 0.4, -0.3]], requires_grad=True)
+    low_temperature = 0.25
+    high_temperature = 1.0
+
+    actual = temperature_policy_kl_from_logits(logits, low_temperature, high_temperature)
+    low_log_probs = torch.log_softmax(logits / low_temperature, dim=-1)
+    high_log_probs = torch.log_softmax(logits / high_temperature, dim=-1)
+    expected = torch.sum(low_log_probs.exp() * (low_log_probs - high_log_probs), dim=-1)
+
+    assert torch.allclose(actual, expected, atol=1e-6)
+    actual.sum().backward()
+    assert logits.grad is not None
+    assert torch.isfinite(logits.grad).all()

@@ -955,15 +955,18 @@ class EngineTrainModeCtx(BaseEngineCtx):
 @EngineRegistry.register(model_type="language_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
 class FSDPEngineWithLMHead(FSDPEngine):
     @staticmethod
-    def _expand_temperature_as_input_ids(
-        temperature: torch.Tensor, input_ids: torch.Tensor, response_mask: torch.Tensor | None
+    def _expand_response_values_as_input_ids(
+        values: torch.Tensor,
+        input_ids: torch.Tensor,
+        response_mask: torch.Tensor | None,
+        fill_value: float,
     ) -> torch.Tensor:
-        if temperature.dim() == 1:
-            return verl_F.expand_as_nested(temperature, input_ids)
-        if temperature.dim() != 2:
-            raise ValueError(f"temperature must have shape (bsz,) or (bsz, response_len), got {temperature.shape}")
+        if values.dim() == 1:
+            return verl_F.expand_as_nested(values, input_ids)
+        if values.dim() != 2:
+            raise ValueError(f"response values must have shape (bsz,) or (bsz, response_len), got {values.shape}")
         if response_mask is None:
-            raise ValueError("response_mask is required for response-token temperature")
+            raise ValueError("response_mask is required for response-token values")
 
         offsets = input_ids.offsets()
         seq_lens = offsets.diff()
@@ -971,15 +974,53 @@ class FSDPEngineWithLMHead(FSDPEngine):
         tensors = []
         for idx, seq_len_tensor in enumerate(seq_lens):
             seq_len = int(seq_len_tensor.item())
-            response_len = min(int(response_lens[idx].item()), int(temperature.shape[1]), seq_len)
-            seq_temperature = torch.ones(seq_len, dtype=temperature.dtype, device=temperature.device)
+            response_len = min(int(response_lens[idx].item()), int(values.shape[1]), seq_len)
+            seq_values = torch.full(
+                (seq_len,), fill_value, dtype=values.dtype, device=values.device
+            )
             if response_len > 0:
                 prompt_len = seq_len - response_len
                 start = max(prompt_len - 1, 0)
                 end = min(start + response_len, seq_len)
-                seq_temperature[start:end] = temperature[idx, : end - start]
-            tensors.append(seq_temperature)
+                seq_values[start:end] = values[idx, : end - start]
+            tensors.append(seq_values)
         return torch.nested.as_nested_tensor(tensors, layout=torch.jagged)
+
+    @staticmethod
+    def _expand_temperature_as_input_ids(
+        temperature: torch.Tensor, input_ids: torch.Tensor, response_mask: torch.Tensor | None
+    ) -> torch.Tensor:
+        return FSDPEngineWithLMHead._expand_response_values_as_input_ids(
+            temperature,
+            input_ids,
+            response_mask,
+            fill_value=1.0,
+        )
+
+    @staticmethod
+    def _compute_bridge_kl_from_logits(
+        logits: torch.Tensor,
+        bridge_mask: torch.Tensor,
+        low_temperature: float,
+        high_temperature: float,
+        chunk_size: int,
+    ) -> torch.Tensor:
+        output = torch.zeros(logits.shape[0], device=logits.device, dtype=torch.float32)
+        indices = torch.nonzero(bridge_mask, as_tuple=False).flatten()
+        if indices.numel() == 0:
+            return output
+
+        values = []
+        chunk_size = max(int(chunk_size), 1)
+        for chunk_indices in indices.split(chunk_size):
+            values.append(
+                verl_F.temperature_policy_kl_from_logits(
+                    logits.index_select(0, chunk_indices),
+                    low_temperature=low_temperature,
+                    high_temperature=high_temperature,
+                )
+            )
+        return output.index_copy(0, indices, torch.cat(values, dim=0))
 
     def prepare_model_inputs(self, micro_batch: TensorDict):
         use_remove_padding = tu.get_non_tensor_data(data=micro_batch, key="use_remove_padding", default=True)
@@ -1004,6 +1045,14 @@ class FSDPEngineWithLMHead(FSDPEngine):
         assert temperature.shape[0] == input_ids.shape[0]
         if temperature.dim() not in {1, 2}:
             raise ValueError(f"temperature must have shape (bsz,) or (bsz, response_len), got {temperature.shape}")
+        bridge_kl_coef = float(
+            tu.get_non_tensor_data(data=micro_batch, key="hpf_bridge_kl_coef", default=0.0) or 0.0
+        )
+        calculate_bridge_kl = bridge_kl_coef > 0
+        if calculate_bridge_kl and use_fused_kernels:
+            raise NotImplementedError("HPF exact bridge KL requires eager logits; disable fused kernels.")
+        if calculate_bridge_kl and not use_remove_padding:
+            raise NotImplementedError("HPF exact bridge KL currently requires use_remove_padding=True.")
 
         # args used to get outputs
         output_args = {}
@@ -1016,6 +1065,14 @@ class FSDPEngineWithLMHead(FSDPEngine):
             )
             temperature_rmpad = temperature_nested.values()  # (total_nnz,)
             temperature_rmpad = temperature_rmpad.unsqueeze(0)  # (1, total_nnz)
+            if calculate_bridge_kl:
+                bridge_mask_nested = self._expand_response_values_as_input_ids(
+                    micro_batch["hpf_bridge_kl_mask"].to(torch.bool),
+                    input_ids,
+                    micro_batch.get("response_mask", None),
+                    fill_value=False,
+                )
+                bridge_mask_rmpad = bridge_mask_nested.values().unsqueeze(0)
 
             if pad_mode == DatasetPadMode.NO_PADDING:
                 input_ids_rmpad = input_ids.values().unsqueeze(0)  # (1, total_nnz)
@@ -1055,6 +1112,13 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 temperature_rmpad, _, _ = ulysses_pad_and_slice_inputs(
                     temperature_rmpad, position_ids_rmpad=None, sp_size=self.ulysses_sequence_parallel_size, pad_value=1
                 )
+                if calculate_bridge_kl:
+                    bridge_mask_rmpad, _, _ = ulysses_pad_and_slice_inputs(
+                        bridge_mask_rmpad,
+                        position_ids_rmpad=None,
+                        sp_size=self.ulysses_sequence_parallel_size,
+                        pad_value=False,
+                    )
 
                 output_args["pad_size"] = pad_size
 
@@ -1062,6 +1126,8 @@ class FSDPEngineWithLMHead(FSDPEngine):
             temperature_rmpad = temperature_rmpad.squeeze(0)
             output_args["input_ids_rmpad_rolled"] = input_ids_rmpad_rolled
             output_args["temperature_rmpad"] = temperature_rmpad
+            if calculate_bridge_kl:
+                output_args["bridge_mask_rmpad"] = bridge_mask_rmpad.squeeze(0).bool()
 
             # only pass input_ids and position_ids to enable flash_attn_varlen
 
@@ -1137,6 +1203,10 @@ class FSDPEngineWithLMHead(FSDPEngine):
         calculate_sum_pi_squared = tu.get_non_tensor_data(
             data=micro_batch, key="calculate_sum_pi_squared", default=False
         )
+        bridge_kl_coef = float(
+            tu.get_non_tensor_data(data=micro_batch, key="hpf_bridge_kl_coef", default=0.0) or 0.0
+        )
+        calculate_bridge_kl = bridge_kl_coef > 0
         distillation_use_topk = tu.get_non_tensor_data(data=micro_batch, key="distillation_use_topk", default=False)
 
         if calculate_sum_pi_squared and use_fused_kernels:
@@ -1174,12 +1244,28 @@ class FSDPEngineWithLMHead(FSDPEngine):
                             model_output[field_name] = torch.nested.nested_tensor_from_jagged(v, cu_seqlens)
             else:
                 logits_rmpad = output.logits.squeeze(0)  # (total_nnz, vocab_size)
-                logits_rmpad.div_(temperature_rmpad.clamp(min=1e-8).unsqueeze(-1).to(logits_rmpad.dtype))
+                if calculate_bridge_kl:
+                    bridge_kl_rmpad = self._compute_bridge_kl_from_logits(
+                        logits=logits_rmpad,
+                        bridge_mask=output_args["bridge_mask_rmpad"],
+                        low_temperature=float(
+                            tu.get_non_tensor_data(data=micro_batch, key="hpf_bridge_low_temperature")
+                        ),
+                        high_temperature=float(
+                            tu.get_non_tensor_data(data=micro_batch, key="hpf_bridge_high_temperature")
+                        ),
+                        chunk_size=int(
+                            tu.get_non_tensor_data(data=micro_batch, key="hpf_bridge_kl_chunk_size", default=32)
+                        ),
+                    )
+                    logits_rmpad = logits_rmpad / temperature_rmpad.clamp(min=1e-8).unsqueeze(-1).to(
+                        logits_rmpad.dtype
+                    )
+                else:
+                    logits_rmpad.div_(temperature_rmpad.clamp(min=1e-8).unsqueeze(-1).to(logits_rmpad.dtype))
 
                 # if use_sp: ((total_nnz / sp) + pad) ; if not use_sp: (batch, seqlen)
-                inplace_backward = True
-                if calculate_entropy:
-                    inplace_backward = False
+                inplace_backward = not (calculate_entropy or calculate_bridge_kl)
                 log_probs = logprobs_from_logits(
                     logits=logits_rmpad,
                     labels=input_ids_rmpad_rolled,
@@ -1236,6 +1322,13 @@ class FSDPEngineWithLMHead(FSDPEngine):
                         unpad_dim=0,
                         padding_size=pad_size,
                     )
+                if calculate_bridge_kl:
+                    bridge_kl_rmpad = gather_outputs_and_unpad(
+                        bridge_kl_rmpad,
+                        gather_dim=0,
+                        unpad_dim=0,
+                        padding_size=pad_size,
+                    )
 
             if pad_mode == DatasetPadMode.NO_PADDING:
                 cu_seqlens = input_ids.offsets()
@@ -1245,6 +1338,8 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     entropy = torch.nested.nested_tensor_from_jagged(entropy_rmpad, cu_seqlens)
                 if calculate_sum_pi_squared:
                     sum_pi_squared = torch.nested.nested_tensor_from_jagged(sum_pi_squared_rmpad, cu_seqlens)
+                if calculate_bridge_kl:
+                    bridge_kl = torch.nested.nested_tensor_from_jagged(bridge_kl_rmpad, cu_seqlens)
             else:
                 raise NotImplementedError(f"pad_mode {pad_mode} not implemented")
 
@@ -1312,6 +1407,8 @@ class FSDPEngineWithLMHead(FSDPEngine):
             model_output["entropy"] = entropy
         if calculate_sum_pi_squared:
             model_output["sum_pi_squared"] = sum_pi_squared
+        if calculate_bridge_kl:
+            model_output["hpf_bridge_kl"] = bridge_kl
 
         return model_output
 

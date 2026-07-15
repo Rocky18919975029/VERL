@@ -18,6 +18,7 @@ class HPFMaskedBatch:
     metrics: dict[str, float]
     prefix_mask: torch.Tensor | None = None
     suffix_mask: torch.Tensor | None = None
+    bridge_mask: torch.Tensor | None = None
 
 
 def _normalize_group_scores(
@@ -143,6 +144,7 @@ def build_hpf_mixed_policy_grpo_batch(
     leader_old_log_probs: torch.Tensor,
     follower_old_log_probs: torch.Tensor,
     full_suffix_tail: bool = False,
+    bridge_window_size: int = 0,
 ) -> HPFMaskedBatch:
     """Build one GRPO update under a position-dependent mixed policy.
 
@@ -169,6 +171,8 @@ def build_hpf_mixed_policy_grpo_batch(
     suffix_window_mask = suffix_window_mask.to(response_mask.dtype)
     suffix_update_mask = full_suffix_mask if full_suffix_tail else suffix_window_mask
     update_mask = (prefix_mask.bool() | suffix_update_mask.bool()).to(response_mask.dtype)
+    bridge_ends = (prefix_lengths + max(int(bridge_window_size), 0)).clamp(max=response_len).unsqueeze(1)
+    bridge_mask = full_suffix_mask.bool() & (positions < bridge_ends)
 
     mixed_old_log_probs = torch.where(
         prefix_mask.bool(),
@@ -185,11 +189,15 @@ def build_hpf_mixed_policy_grpo_batch(
     # complete-trajectory rewards; only the PG mask limits trained tokens.
     update_batch.batch["advantages"] = batch.batch["advantages"] * update_mask.to(batch.batch["advantages"])
     update_batch.batch["returns"] = update_batch.batch["advantages"]
+    if bridge_window_size > 0:
+        update_batch.batch["hpf_bridge_kl_mask"] = bridge_mask
 
     suffix_nonempty = suffix_update_mask.sum(dim=-1) > 0
     metrics = {
         "hpf/mixed_policy_grpo_enabled": 1.0,
         "hpf/mixed_policy_grpo_full_suffix_tail": float(full_suffix_tail),
+        "hpf/mixed_policy_grpo_bridge_window_size": float(max(int(bridge_window_size), 0)),
+        "hpf/mixed_policy_grpo_bridge_tokens_mean": float(bridge_mask.sum(dim=-1).float().mean().item()),
         "hpf/mixed_policy_grpo_horizon_tokens": float(horizon),
         "hpf/mixed_policy_grpo_prefix_tokens_mean": float(prefix_mask.sum(dim=-1).float().mean().item()),
         "hpf/mixed_policy_grpo_suffix_tokens_mean": float(
@@ -203,6 +211,7 @@ def build_hpf_mixed_policy_grpo_batch(
         metrics=metrics,
         prefix_mask=prefix_mask,
         suffix_mask=suffix_update_mask,
+        bridge_mask=bridge_mask,
     )
 
 

@@ -188,6 +188,15 @@ algorithm:
       # Train every valid token after the prefix instead of one horizon-length suffix window.
       full_suffix_tail: False
 
+      # Exact KL(low-temperature policy || high-temperature policy) on a separate bridge window.
+      bridge_kl_coef: 0.0
+
+      # Number of valid tokens immediately after the prefix used by the bridge KL.
+      bridge_window_size: 64
+
+      # Vocabulary-logit rows processed together when computing the exact bridge KL.
+      bridge_kl_chunk_size: 32
+
     # Two-stage prefix-follower rollout construction. Disabled by default so
     # existing GRPO and masked HPF smoke paths remain unchanged.
     tree_rollout:

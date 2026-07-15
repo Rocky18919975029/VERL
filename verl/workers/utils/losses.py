@@ -95,6 +95,14 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     hpf_kl_type = tu.get_non_tensor_data(data=data, key="hpf_kl_type", default=config.kl_loss_type)
     if hpf_kl_coef > 0:
         fields.extend(["hpf_kl_ref_log_prob", "hpf_kl_mask"])
+    hpf_bridge_kl_coef = float(
+        tu.get_non_tensor_data(data=data, key="hpf_bridge_kl_coef", default=0.0) or 0.0
+    )
+    if hpf_bridge_kl_coef > 0:
+        if "hpf_bridge_kl" not in model_output:
+            raise ValueError("hpf_bridge_kl is required when hpf_bridge_kl_coef is positive")
+        hpf_bridge_kl = no_padding_2_padding(model_output["hpf_bridge_kl"], data)
+        fields.append("hpf_bridge_kl_mask")
     data = data.select(*fields).to_padded_tensor()
 
     response_mask = data["response_mask"].to(bool)
@@ -160,6 +168,20 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
         policy_loss += hpf_kl_coef * hpf_kl_loss
         metrics["actor/hpf_kl_loss"] = Metric(value=hpf_kl_loss, aggregation=metric_aggregation)
         metrics["actor/hpf_kl_coef"] = hpf_kl_coef
+
+    if hpf_bridge_kl_coef > 0:
+        bridge_mask = data["hpf_bridge_kl_mask"].to(bool)
+        bridge_kl_loss = agg_loss(
+            loss_mat=hpf_bridge_kl,
+            loss_mask=bridge_mask,
+            loss_agg_mode="seq-mean-token-sum",
+            **config.global_batch_info,
+        )
+        policy_loss += hpf_bridge_kl_coef * bridge_kl_loss
+        metrics["actor/hpf_bridge_kl_loss"] = Metric(
+            value=bridge_kl_loss, aggregation=metric_aggregation
+        )
+        metrics["actor/hpf_bridge_kl_coef"] = hpf_bridge_kl_coef
 
     return policy_loss, metrics
 
