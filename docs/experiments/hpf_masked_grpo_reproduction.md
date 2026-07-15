@@ -455,6 +455,43 @@ hpf/role_phase_epoch
 hpf/role_phase_round
 ```
 
+## Optional One-Stage Mixed-Policy GRPO
+
+Set `HPF_MIXED_POLICY_GRPO=True` to replace the two HPF actor updates with one
+GRPO update. For horizon `H`, rollout first samples `K` high-temperature prefix
+blocks and completes each prefix once at the low suffix temperature. Rewards
+and group-relative advantages use the complete trajectories, while actor
+training is restricted to the prefix and the next `H` suffix tokens:
+
+```text
+prefix update positions: [0, H)
+suffix update positions: [H, 2H)
+```
+
+The old and updating policies are both position dependent: prefix logits are
+scaled by `HPF_TREE_PREFIX_TEMPERATURE`, and suffix logits are scaled by
+`HPF_TREE_SUFFIX_TEMPERATURE`. Thus PPO ratios compare the same mixed-policy
+definition in numerator and denominator. Actor forward is physically truncated
+to at most `2H`; the untruncated trajectory remains available for reward and
+advantage construction.
+
+This mode requires:
+
+```bash
+HPF_TREE_ROLLOUT=True
+HPF_TREE_NUM_PREFIXES=8       # K, for example
+HPF_TREE_NUM_SUFFIXES=1
+HPF_FRESH_LEADER_TREE=False
+HPF_LOCAL_UPDATE_WINDOW=False
+HPF_ROLE_PHASED_TRAINING=False
+HPF_TREE_PREFIX_TOP_P=1.0
+HPF_TREE_SUFFIX_TOP_P=1.0
+```
+
+The mode is disabled by default and does not alter the original Alg2, Alg3, or
+GRPO baseline paths. The launcher and trainer reject incompatible combinations
+before actor training.
+
 ## Notes
 
 - This HPF path should not modify the GRPO baseline reproduction script beyond

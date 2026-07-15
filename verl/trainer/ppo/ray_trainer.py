@@ -47,6 +47,7 @@ from verl.trainer.ppo.hpf_utils import (
     build_hpf_corrected_leader_batch,
     build_hpf_fresh_leader_batch,
     build_hpf_masked_batches,
+    build_hpf_mixed_policy_grpo_batch,
 )
 from verl.trainer.ppo.hpf_schedule import get_hpf_role_phase
 from verl.trainer.ppo.metric_utils import (
@@ -444,6 +445,39 @@ class RayPPOTrainer:
         hpf_config = self.config.algorithm.get("hpf_rlvr", {})
         role_phased_config = hpf_config.get("role_phased_training", {})
         role_phased_training = self._parse_hpf_bool(role_phased_config.get("enable", False), False)
+        mixed_policy_config = hpf_config.get("mixed_policy_grpo", {})
+        mixed_policy_grpo = self._parse_hpf_bool(mixed_policy_config.get("enable", False), False)
+        if mixed_policy_grpo:
+            tree_config = hpf_config.get("tree_rollout", {})
+            if not self._parse_hpf_bool(hpf_config.get("enable", False), False) or not self._parse_hpf_bool(
+                tree_config.get("enable", False), False
+            ):
+                raise ValueError("HPF mixed-policy GRPO requires HPF and tree rollout to be enabled.")
+            if int(tree_config.get("num_suffixes", 1)) != 1:
+                raise ValueError("HPF mixed-policy GRPO requires tree_rollout.num_suffixes=1.")
+            if float(tree_config.get("prefix_top_p", 1.0)) != 1.0 or float(
+                tree_config.get("suffix_top_p", 1.0)
+            ) != 1.0:
+                raise ValueError(
+                    "HPF mixed-policy GRPO requires prefix_top_p=suffix_top_p=1.0 so the training "
+                    "policy exactly matches the temperature-scaled rollout policy."
+                )
+            if self.config.algorithm.adv_estimator != AdvantageEstimator.GRPO:
+                raise ValueError("HPF mixed-policy GRPO requires algorithm.adv_estimator=grpo.")
+            if self._parse_hpf_bool(self.config.algorithm.get("use_kl_in_reward", False), False):
+                raise ValueError("HPF mixed-policy GRPO requires algorithm.use_kl_in_reward=False.")
+            if self._parse_hpf_bool(self.config.actor_rollout_ref.actor.get("use_kl_loss", False), False):
+                raise ValueError("HPF mixed-policy GRPO is a pure GRPO update and requires actor.use_kl_loss=False.")
+            if self._parse_hpf_bool(hpf_config.get("fresh_leader_tree", False), False):
+                raise ValueError("HPF mixed-policy GRPO is a one-update path and requires fresh_leader_tree=False.")
+            if role_phased_training:
+                raise ValueError("HPF mixed-policy GRPO cannot be combined with role-phased training.")
+            local_window_config = hpf_config.get("local_update_window", {})
+            if self._parse_hpf_bool(local_window_config.get("enable", False), False):
+                raise ValueError(
+                    "HPF mixed-policy GRPO defines its own prefix-plus-suffix window; "
+                    "disable local_update_window."
+                )
         if role_phased_training:
             follower_epochs = int(role_phased_config.get("follower_epochs", 1))
             leader_epochs = int(role_phased_config.get("leader_epochs", 1))
@@ -1676,6 +1710,105 @@ class RayPPOTrainer:
         )
         return batch
 
+    def _update_actor_hpf_mixed_policy_grpo(
+        self,
+        batch: DataProto,
+        *,
+        hpf_round_index: int | None,
+    ) -> DataProto:
+        """Run one masked GRPO update under the tree rollout's mixed policy."""
+        hpf_config = self.config.algorithm.get("hpf_rlvr", {})
+        tree_config = hpf_config.get("tree_rollout", {})
+        progressive_block_size = int(hpf_config.get("progressive_block_size", 256))
+        max_response_length = int(hpf_config.get("max_response_length", self.config.data.max_response_length))
+        prefix_temperature = float(
+            tree_config.get("prefix_temperature", self.config.actor_rollout_ref.rollout.temperature)
+        )
+        suffix_temperature = float(
+            tree_config.get("suffix_temperature", self.config.actor_rollout_ref.rollout.temperature)
+        )
+        if hpf_round_index is None:
+            hpf_round_index = self._get_hpf_round_index(None)
+        if (
+            "hpf_leader_rollout_old_log_probs" not in batch.batch
+            or "hpf_follower_rollout_old_log_probs" not in batch.batch
+        ):
+            raise ValueError("HPF mixed-policy GRPO requires tree rollout log probabilities.")
+
+        mixed = build_hpf_mixed_policy_grpo_batch(
+            batch=batch,
+            round_index=hpf_round_index,
+            progressive_block_size=progressive_block_size,
+            max_response_length=max_response_length,
+            leader_old_log_probs=batch.batch["hpf_leader_rollout_old_log_probs"],
+            follower_old_log_probs=batch.batch["hpf_follower_rollout_old_log_probs"],
+        )
+        update_batch = mixed.batch
+        tree_log_prob_keys = [
+            key
+            for key in ("hpf_leader_rollout_old_log_probs", "hpf_follower_rollout_old_log_probs")
+            if key in update_batch.batch
+        ]
+        if tree_log_prob_keys:
+            update_batch.pop(batch_keys=tree_log_prob_keys)
+        response_len_before = update_batch.batch["responses"].shape[-1]
+        horizon = min(hpf_round_index * progressive_block_size, max_response_length, response_len_before)
+        response_len_after = self._truncate_hpf_update_batch_response(update_batch, 2 * horizon)
+
+        response_mask = update_batch.batch["response_mask"]
+        prefix_mask = mixed.prefix_mask[..., :response_len_after].bool()
+        suffix_mask = mixed.suffix_mask[..., :response_len_after].bool()
+        temperature = torch.ones_like(response_mask, dtype=torch.float32)
+        temperature = torch.where(
+            prefix_mask, torch.full_like(temperature, prefix_temperature), temperature
+        )
+        temperature = torch.where(
+            suffix_mask, torch.full_like(temperature, suffix_temperature), temperature
+        )
+        update_batch.batch["temperature"] = temperature
+        update_batch.meta_info.pop("temperature", None)
+
+        mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size * int(
+            self.config.actor_rollout_ref.rollout.n
+        )
+        update_batch, pad_size = pad_dataproto_to_divisor(update_batch, mini_batch_size)
+        metrics = dict(mixed.metrics)
+        metrics.update(
+            {
+                "hpf/mixed_policy_grpo_prefix_temperature": prefix_temperature,
+                "hpf/mixed_policy_grpo_suffix_temperature": suffix_temperature,
+                "hpf/mixed_policy_grpo_response_len_before": float(response_len_before),
+                "hpf/mixed_policy_grpo_response_len_after": float(response_len_after),
+                "hpf/mixed_policy_grpo_pad_size": float(pad_size),
+                "hpf/mixed_policy_grpo_optimizer_steps": float(
+                    math.ceil(len(update_batch) / mini_batch_size)
+                    * self.config.actor_rollout_ref.actor.ppo_epochs
+                ),
+            }
+        )
+        print(
+            "[HPF] mixed-policy GRPO actor update start "
+            f"step={self.global_steps} batch={len(update_batch)} pad={pad_size} horizon={horizon} "
+            f"response_len={response_len_before}->{response_len_after} "
+            f"prefix_temp={prefix_temperature} suffix_temp={suffix_temperature}",
+            flush=True,
+        )
+        update_start = time.perf_counter()
+        actor_output = self._update_actor(
+            update_batch,
+            progress_label=f"hpf/mixed-policy-grpo/step-{self.global_steps}",
+            progress_log_interval=int(hpf_config.get("progress_log_interval", 1)),
+        )
+        elapsed = time.perf_counter() - update_start
+        print(
+            f"[HPF] mixed-policy GRPO actor update done step={self.global_steps} elapsed_s={elapsed:.2f}",
+            flush=True,
+        )
+        metrics["timing_s/hpf/mixed_policy_grpo_update_actor"] = float(elapsed)
+        actor_metrics = reduce_metrics(actor_output.meta_info["metrics"])
+        metrics.update(rename_dict(actor_metrics, "hpf/mixed_policy_grpo/"))
+        return DataProto.from_single_dict(data={}, meta_info={"metrics": metrics})
+
     def _update_actor_hpf_masked_grpo(
         self,
         batch: DataProto,
@@ -2388,6 +2521,9 @@ class RayPPOTrainer:
         hpf_config = self.config.algorithm.get("hpf_rlvr", {})
         role_phased_config = hpf_config.get("role_phased_training", {})
         role_phased_training = self._parse_hpf_bool(role_phased_config.get("enable", False), False)
+        mixed_policy_grpo = self._parse_hpf_bool(
+            hpf_config.get("mixed_policy_grpo", {}).get("enable", False), False
+        )
         physical_total_epochs = int(self.config.trainer.total_epochs)
         if role_phased_training:
             follower_phase_epochs = int(role_phased_config.get("follower_epochs", 1))
@@ -2683,7 +2819,7 @@ class RayPPOTrainer:
                         else:
                             batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
 
-                        if use_hpf_tree_rollout:
+                        if use_hpf_tree_rollout and not mixed_policy_grpo:
                             metrics["hpf/skipped_shared_advantage"] = 1.0
                         else:
                             # Compute rollout correction: IS weights, rejection sampling, and metrics
@@ -2715,7 +2851,7 @@ class RayPPOTrainer:
                                 adv_estimator=self.config.algorithm.adv_estimator,
                                 gamma=self.config.algorithm.gamma,
                                 lam=self.config.algorithm.lam,
-                                num_repeat=self.config.actor_rollout_ref.rollout.n,
+                                num_repeat=effective_rollout_n,
                                 norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                                 config=self.config.algorithm,
                             )
@@ -2734,7 +2870,12 @@ class RayPPOTrainer:
                     else:
                         # update actor
                         with marked_timer("update_actor", timing_raw, color="red"):
-                            if self.config.algorithm.get("hpf_rlvr", {}).get("enable", False):
+                            if mixed_policy_grpo:
+                                actor_output = self._update_actor_hpf_mixed_policy_grpo(
+                                    batch,
+                                    hpf_round_index=hpf_round_index,
+                                )
+                            elif self.config.algorithm.get("hpf_rlvr", {}).get("enable", False):
                                 actor_output = self._update_actor_hpf_masked_grpo(
                                     batch,
                                     hpf_round_index=hpf_round_index,

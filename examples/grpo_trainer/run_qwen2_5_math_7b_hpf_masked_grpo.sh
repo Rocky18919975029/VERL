@@ -23,6 +23,7 @@ HPF_FRESH_LEADER_TREE=${HPF_FRESH_LEADER_TREE:-False}
 HPF_LOCAL_UPDATE_WINDOW=${HPF_LOCAL_UPDATE_WINDOW:-False}
 HPF_LOCAL_UPDATE_WINDOW_SIZE=${HPF_LOCAL_UPDATE_WINDOW_SIZE:-null}
 HPF_ROLE_PHASED_TRAINING=${HPF_ROLE_PHASED_TRAINING:-False}
+HPF_MIXED_POLICY_GRPO=${HPF_MIXED_POLICY_GRPO:-False}
 HPF_FOLLOWER_PHASE_EPOCHS=${HPF_FOLLOWER_PHASE_EPOCHS:-1}
 HPF_LEADER_PHASE_EPOCHS=${HPF_LEADER_PHASE_EPOCHS:-1}
 HPF_PROGRESS_LOG_INTERVAL=${HPF_PROGRESS_LOG_INTERVAL:-1}
@@ -55,6 +56,42 @@ if [ "${HPF_ROLE_PHASED_TRAINING}" = "True" ] || [ "${HPF_ROLE_PHASED_TRAINING}"
     fi
     if [ "${HPF_FOLLOWER_PHASE_EPOCHS}" -le 0 ] || [ "${HPF_LEADER_PHASE_EPOCHS}" -le 0 ]; then
         echo "HPF follower and leader phase epochs must both be positive." >&2
+        exit 1
+    fi
+fi
+
+if [ "${HPF_MIXED_POLICY_GRPO}" = "True" ] || [ "${HPF_MIXED_POLICY_GRPO}" = "true" ] \
+    || [ "${HPF_MIXED_POLICY_GRPO}" = "1" ]; then
+    if [ "${HPF_TREE_ROLLOUT}" != "True" ] && [ "${HPF_TREE_ROLLOUT}" != "true" ] \
+        && [ "${HPF_TREE_ROLLOUT}" != "1" ]; then
+        echo "HPF mixed-policy GRPO requires HPF_TREE_ROLLOUT=True." >&2
+        exit 1
+    fi
+    if [ "${HPF_TREE_NUM_SUFFIXES}" -ne 1 ]; then
+        echo "HPF mixed-policy GRPO requires HPF_TREE_NUM_SUFFIXES=1." >&2
+        exit 1
+    fi
+    if [ "${HPF_TREE_PREFIX_TOP_P}" != "1.0" ] && [ "${HPF_TREE_PREFIX_TOP_P}" != "1" ]; then
+        echo "HPF mixed-policy GRPO requires HPF_TREE_PREFIX_TOP_P=1.0." >&2
+        exit 1
+    fi
+    if [ "${HPF_TREE_SUFFIX_TOP_P}" != "1.0" ] && [ "${HPF_TREE_SUFFIX_TOP_P}" != "1" ]; then
+        echo "HPF mixed-policy GRPO requires HPF_TREE_SUFFIX_TOP_P=1.0." >&2
+        exit 1
+    fi
+    if [ "${HPF_FRESH_LEADER_TREE}" = "True" ] || [ "${HPF_FRESH_LEADER_TREE}" = "true" ] \
+        || [ "${HPF_FRESH_LEADER_TREE}" = "1" ]; then
+        echo "HPF mixed-policy GRPO requires HPF_FRESH_LEADER_TREE=False." >&2
+        exit 1
+    fi
+    if [ "${HPF_LOCAL_UPDATE_WINDOW}" = "True" ] || [ "${HPF_LOCAL_UPDATE_WINDOW}" = "true" ] \
+        || [ "${HPF_LOCAL_UPDATE_WINDOW}" = "1" ]; then
+        echo "HPF mixed-policy GRPO defines its own update window; set HPF_LOCAL_UPDATE_WINDOW=False." >&2
+        exit 1
+    fi
+    if [ "${HPF_ROLE_PHASED_TRAINING}" = "True" ] || [ "${HPF_ROLE_PHASED_TRAINING}" = "true" ] \
+        || [ "${HPF_ROLE_PHASED_TRAINING}" = "1" ]; then
+        echo "HPF mixed-policy GRPO cannot be combined with role-phased training." >&2
         exit 1
     fi
 fi
@@ -103,6 +140,7 @@ HPF_ARGS=(
     algorithm.hpf_rlvr.role_phased_training.enable="${HPF_ROLE_PHASED_TRAINING}"
     algorithm.hpf_rlvr.role_phased_training.follower_epochs="${HPF_FOLLOWER_PHASE_EPOCHS}"
     algorithm.hpf_rlvr.role_phased_training.leader_epochs="${HPF_LEADER_PHASE_EPOCHS}"
+    algorithm.hpf_rlvr.mixed_policy_grpo.enable="${HPF_MIXED_POLICY_GRPO}"
     algorithm.hpf_rlvr.progress_log_interval="${HPF_PROGRESS_LOG_INTERVAL}"
     actor_rollout_ref.actor.loss_agg_mode="${HPF_LOSS_AGG_MODE}"
 )

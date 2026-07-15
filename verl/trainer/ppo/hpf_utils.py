@@ -135,6 +135,73 @@ def _clone_for_masked_update(
     return update_batch
 
 
+def build_hpf_mixed_policy_grpo_batch(
+    batch: DataProto,
+    round_index: int,
+    progressive_block_size: int,
+    max_response_length: int,
+    leader_old_log_probs: torch.Tensor,
+    follower_old_log_probs: torch.Tensor,
+) -> HPFMaskedBatch:
+    """Build one GRPO update under a position-dependent mixed policy.
+
+    The rollout reward and GRPO advantage come from the complete trajectory.
+    Policy-gradient tokens are limited to the sampled prefix and the next
+    ``horizon`` suffix tokens. The PPO anchor uses the high-temperature prefix
+    policy on prefix tokens and the low-temperature follower policy on suffix
+    tokens.
+    """
+    if "response_mask" not in batch.batch:
+        raise ValueError("response_mask is required before building HPF masks")
+    if "advantages" not in batch.batch:
+        raise ValueError("advantages are required before building mixed-policy GRPO")
+
+    horizon, prefix_lengths, prefix_mask, full_suffix_mask = _compute_horizon_masks(
+        batch, round_index, progressive_block_size, max_response_length
+    )
+    response_mask = batch.batch["response_mask"]
+    response_len = response_mask.shape[-1]
+    positions = torch.arange(response_len, device=response_mask.device).unsqueeze(0)
+    suffix_ends = (prefix_lengths + horizon).clamp(max=response_len).unsqueeze(1)
+    suffix_window_mask = full_suffix_mask.bool() & (positions < suffix_ends)
+    suffix_window_mask = suffix_window_mask.to(response_mask.dtype)
+    update_mask = (prefix_mask.bool() | suffix_window_mask.bool()).to(response_mask.dtype)
+
+    mixed_old_log_probs = torch.where(
+        prefix_mask.bool(),
+        leader_old_log_probs.to(device=response_mask.device, dtype=torch.float32),
+        follower_old_log_probs.to(device=response_mask.device, dtype=torch.float32),
+    )
+    update_batch = _clone_for_masked_update(
+        batch,
+        update_mask,
+        torch.zeros(response_mask.shape[0], device=response_mask.device, dtype=torch.float32),
+        old_log_probs=mixed_old_log_probs,
+    )
+    # Preserve the standard GRPO token-level advantages computed from the
+    # complete-trajectory rewards; only the PG mask limits trained tokens.
+    update_batch.batch["advantages"] = batch.batch["advantages"] * update_mask.to(batch.batch["advantages"])
+    update_batch.batch["returns"] = update_batch.batch["advantages"]
+
+    suffix_nonempty = suffix_window_mask.sum(dim=-1) > 0
+    metrics = {
+        "hpf/mixed_policy_grpo_enabled": 1.0,
+        "hpf/mixed_policy_grpo_horizon_tokens": float(horizon),
+        "hpf/mixed_policy_grpo_prefix_tokens_mean": float(prefix_mask.sum(dim=-1).float().mean().item()),
+        "hpf/mixed_policy_grpo_suffix_tokens_mean": float(
+            suffix_window_mask.sum(dim=-1).float().mean().item()
+        ),
+        "hpf/mixed_policy_grpo_update_tokens_mean": float(update_mask.sum(dim=-1).float().mean().item()),
+        "hpf/mixed_policy_grpo_suffix_empty_frac": float((~suffix_nonempty).float().mean().item()),
+    }
+    return HPFMaskedBatch(
+        batch=update_batch,
+        metrics=metrics,
+        prefix_mask=prefix_mask,
+        suffix_mask=suffix_window_mask,
+    )
+
+
 def _masked_sequence_correction(
     updated_log_probs: torch.Tensor,
     old_log_probs: torch.Tensor,
