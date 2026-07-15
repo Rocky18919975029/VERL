@@ -262,9 +262,13 @@ def plot_update_aligned(original: pd.DataFrame, mixed: pd.DataFrame, output_dir:
 
     original = original.copy()
     mixed = mixed.copy()
-    original["train_budget_step"] = 2 * (original["step"] - 1)
+    # Train accuracy is measured on the rollout sampled at this step, so place
+    # it at the cumulative rollout count including that batch. Alg3 performs an
+    # initial and a fresh rollout per global step, while mixed-policy performs
+    # one rollout per global step. Only Alg3's initial-rollout metric is logged.
+    original["train_budget_step"] = 2 * original["step"] - 1
     original["eval_budget_step"] = 2 * original["step"]
-    mixed["train_budget_step"] = mixed["step"] - 1
+    mixed["train_budget_step"] = mixed["step"]
     mixed["eval_budget_step"] = mixed["step"]
 
     fig, axes = plt.subplots(1, 2, figsize=(15, 6))
@@ -277,7 +281,7 @@ def plot_update_aligned(original: pd.DataFrame, mixed: pd.DataFrame, output_dir:
             frame["eval_budget_step"], frame["eval_acc"], label=label, color=color, marker=marker, linewidth=2.4
         )
 
-    style_axis(axes[0], "Train rollout accuracy", "Completed rollout/update rounds before sampling")
+    style_axis(axes[0], "Train rollout accuracy", "Cumulative rollout batches including this sample")
     style_axis(axes[1], "AIME24 validation accuracy", "Completed rollout/update rounds")
     for ax in axes:
         ax.set_xlim(left=0)
