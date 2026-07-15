@@ -1727,6 +1727,9 @@ class RayPPOTrainer:
         suffix_temperature = float(
             tree_config.get("suffix_temperature", self.config.actor_rollout_ref.rollout.temperature)
         )
+        full_suffix_tail = self._parse_hpf_bool(
+            hpf_config.get("mixed_policy_grpo", {}).get("full_suffix_tail", False), False
+        )
         if hpf_round_index is None:
             hpf_round_index = self._get_hpf_round_index(None)
         if (
@@ -1742,6 +1745,7 @@ class RayPPOTrainer:
             max_response_length=max_response_length,
             leader_old_log_probs=batch.batch["hpf_leader_rollout_old_log_probs"],
             follower_old_log_probs=batch.batch["hpf_follower_rollout_old_log_probs"],
+            full_suffix_tail=full_suffix_tail,
         )
         update_batch = mixed.batch
         tree_log_prob_keys = [
@@ -1753,7 +1757,11 @@ class RayPPOTrainer:
             update_batch.pop(batch_keys=tree_log_prob_keys)
         response_len_before = update_batch.batch["responses"].shape[-1]
         horizon = min(hpf_round_index * progressive_block_size, max_response_length, response_len_before)
-        response_len_after = self._truncate_hpf_update_batch_response(update_batch, 2 * horizon)
+        if full_suffix_tail:
+            update_length = int(update_batch.batch["response_mask"].sum(dim=-1).max().item())
+        else:
+            update_length = 2 * horizon
+        response_len_after = self._truncate_hpf_update_batch_response(update_batch, update_length)
 
         response_mask = update_batch.batch["response_mask"]
         prefix_mask = mixed.prefix_mask[..., :response_len_after].bool()
@@ -1777,6 +1785,7 @@ class RayPPOTrainer:
             {
                 "hpf/mixed_policy_grpo_prefix_temperature": prefix_temperature,
                 "hpf/mixed_policy_grpo_suffix_temperature": suffix_temperature,
+                "hpf/mixed_policy_grpo_full_suffix_tail": float(full_suffix_tail),
                 "hpf/mixed_policy_grpo_response_len_before": float(response_len_before),
                 "hpf/mixed_policy_grpo_response_len_after": float(response_len_after),
                 "hpf/mixed_policy_grpo_pad_size": float(pad_size),
@@ -1790,6 +1799,7 @@ class RayPPOTrainer:
             "[HPF] mixed-policy GRPO actor update start "
             f"step={self.global_steps} batch={len(update_batch)} pad={pad_size} horizon={horizon} "
             f"response_len={response_len_before}->{response_len_after} "
+            f"full_suffix_tail={full_suffix_tail} "
             f"prefix_temp={prefix_temperature} suffix_temp={suffix_temperature}",
             flush=True,
         )

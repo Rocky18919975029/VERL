@@ -72,3 +72,42 @@ def test_mixed_policy_grpo_rejects_missing_standard_advantages():
             leader_old_log_probs=log_probs,
             follower_old_log_probs=log_probs,
         )
+
+
+def test_mixed_policy_grpo_can_train_the_full_suffix_tail():
+    response_mask = torch.tensor(
+        [
+            [1, 1, 1, 1, 1, 1],
+            [1, 1, 1, 0, 0, 0],
+        ],
+        dtype=torch.long,
+    )
+    advantages = torch.tensor([[2.0] * 6, [-1.0] * 6])
+    batch = DataProto.from_single_dict(
+        {
+            "response_mask": response_mask,
+            "advantages": advantages,
+            "returns": advantages.clone(),
+        }
+    )
+    leader_log_probs = torch.full((2, 6), -1.0)
+    follower_log_probs = torch.full((2, 6), -3.0)
+
+    mixed = build_hpf_mixed_policy_grpo_batch(
+        batch=batch,
+        round_index=1,
+        progressive_block_size=2,
+        max_response_length=6,
+        leader_old_log_probs=leader_log_probs,
+        follower_old_log_probs=follower_log_probs,
+        full_suffix_tail=True,
+    )
+
+    expected_prefix = torch.tensor([[1, 1, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0]])
+    expected_suffix = torch.tensor([[0, 0, 1, 1, 1, 1], [0, 0, 1, 0, 0, 0]])
+    expected_update = response_mask.bool()
+    assert torch.equal(mixed.prefix_mask.bool(), expected_prefix.bool())
+    assert torch.equal(mixed.suffix_mask.bool(), expected_suffix.bool())
+    assert torch.equal(mixed.batch.batch["hpf_pg_mask"].bool(), expected_update)
+    assert torch.equal(mixed.batch.batch["advantages"], advantages * expected_update)
+    assert mixed.metrics["hpf/mixed_policy_grpo_full_suffix_tail"] == 1.0

@@ -142,14 +142,16 @@ def build_hpf_mixed_policy_grpo_batch(
     max_response_length: int,
     leader_old_log_probs: torch.Tensor,
     follower_old_log_probs: torch.Tensor,
+    full_suffix_tail: bool = False,
 ) -> HPFMaskedBatch:
     """Build one GRPO update under a position-dependent mixed policy.
 
     The rollout reward and GRPO advantage come from the complete trajectory.
-    Policy-gradient tokens are limited to the sampled prefix and the next
-    ``horizon`` suffix tokens. The PPO anchor uses the high-temperature prefix
-    policy on prefix tokens and the low-temperature follower policy on suffix
-    tokens.
+    By default, policy-gradient tokens are limited to the sampled prefix and
+    the next ``horizon`` suffix tokens. When ``full_suffix_tail`` is enabled,
+    every valid response token after the prefix is trained instead. The PPO
+    anchor uses the high-temperature prefix policy on prefix tokens and the
+    low-temperature follower policy on suffix tokens.
     """
     if "response_mask" not in batch.batch:
         raise ValueError("response_mask is required before building HPF masks")
@@ -165,7 +167,8 @@ def build_hpf_mixed_policy_grpo_batch(
     suffix_ends = (prefix_lengths + horizon).clamp(max=response_len).unsqueeze(1)
     suffix_window_mask = full_suffix_mask.bool() & (positions < suffix_ends)
     suffix_window_mask = suffix_window_mask.to(response_mask.dtype)
-    update_mask = (prefix_mask.bool() | suffix_window_mask.bool()).to(response_mask.dtype)
+    suffix_update_mask = full_suffix_mask if full_suffix_tail else suffix_window_mask
+    update_mask = (prefix_mask.bool() | suffix_update_mask.bool()).to(response_mask.dtype)
 
     mixed_old_log_probs = torch.where(
         prefix_mask.bool(),
@@ -183,13 +186,14 @@ def build_hpf_mixed_policy_grpo_batch(
     update_batch.batch["advantages"] = batch.batch["advantages"] * update_mask.to(batch.batch["advantages"])
     update_batch.batch["returns"] = update_batch.batch["advantages"]
 
-    suffix_nonempty = suffix_window_mask.sum(dim=-1) > 0
+    suffix_nonempty = suffix_update_mask.sum(dim=-1) > 0
     metrics = {
         "hpf/mixed_policy_grpo_enabled": 1.0,
+        "hpf/mixed_policy_grpo_full_suffix_tail": float(full_suffix_tail),
         "hpf/mixed_policy_grpo_horizon_tokens": float(horizon),
         "hpf/mixed_policy_grpo_prefix_tokens_mean": float(prefix_mask.sum(dim=-1).float().mean().item()),
         "hpf/mixed_policy_grpo_suffix_tokens_mean": float(
-            suffix_window_mask.sum(dim=-1).float().mean().item()
+            suffix_update_mask.sum(dim=-1).float().mean().item()
         ),
         "hpf/mixed_policy_grpo_update_tokens_mean": float(update_mask.sum(dim=-1).float().mean().item()),
         "hpf/mixed_policy_grpo_suffix_empty_frac": float((~suffix_nonempty).float().mean().item()),
@@ -198,7 +202,7 @@ def build_hpf_mixed_policy_grpo_batch(
         batch=update_batch,
         metrics=metrics,
         prefix_mask=prefix_mask,
-        suffix_mask=suffix_window_mask,
+        suffix_mask=suffix_update_mask,
     )
 
 
