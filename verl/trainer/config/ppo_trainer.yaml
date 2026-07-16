@@ -188,15 +188,6 @@ algorithm:
       # Train every valid token after the prefix instead of one horizon-length suffix window.
       full_suffix_tail: False
 
-      # Penalize a predicted performance drop at the next cut using a second,
-      # cut-specific GRPO batch. Disabled to preserve the original mixed-policy path.
-      transition_aware:
-
-        enable: False
-
-        # Coefficient on relu(-transition_surrogate).
-        coefficient: 1.0
-
     # Two-stage prefix-follower rollout construction. Disabled by default so
     # existing GRPO and masked HPF smoke paths remain unchanged.
     tree_rollout:

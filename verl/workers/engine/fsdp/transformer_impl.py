@@ -627,31 +627,6 @@ class FSDPEngine(BaseEngine):
         tu.assign_non_tensor(data, batch_num_tokens=batch_num_tokens.item())
         tu.assign_non_tensor(data, dp_size=self.get_data_parallel_size())
 
-        if "hpf_transition_cut" in data:
-            transition_cut = data["hpf_transition_cut"].to(get_device_id()).long()
-            response_mask = data["hpf_pg_mask"] if "hpf_pg_mask" in data else data["response_mask"]
-            response_mask = response_mask.to(get_device_id()).bool()
-            current_rows = transition_cut == 0
-            next_rows = transition_cut == 1
-            transition_counts = torch.stack(
-                [
-                    response_mask[current_rows].sum(),
-                    response_mask[next_rows].sum(),
-                    current_rows.sum(),
-                    next_rows.sum(),
-                ]
-            ).to(torch.long)
-            torch.distributed.all_reduce(
-                transition_counts, op=torch.distributed.ReduceOp.SUM, group=self.get_data_parallel_group()
-            )
-            tu.assign_non_tensor(
-                data,
-                hpf_transition_current_num_tokens=int(transition_counts[0].item()),
-                hpf_transition_next_num_tokens=int(transition_counts[1].item()),
-                hpf_transition_current_batch_size=int(transition_counts[2].item()),
-                hpf_transition_next_batch_size=int(transition_counts[3].item()),
-            )
-
         micro_batches, indices = prepare_micro_batches(
             data=data, dp_group=self.get_data_parallel_group(), same_micro_num_in_dp=True
         )

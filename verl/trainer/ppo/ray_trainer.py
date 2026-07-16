@@ -48,7 +48,6 @@ from verl.trainer.ppo.hpf_utils import (
     build_hpf_fresh_leader_batch,
     build_hpf_masked_batches,
     build_hpf_mixed_policy_grpo_batch,
-    compute_hpf_clipped_grpo_surrogate,
 )
 from verl.trainer.ppo.hpf_schedule import get_hpf_role_phase
 from verl.trainer.ppo.metric_utils import (
@@ -448,8 +447,6 @@ class RayPPOTrainer:
         role_phased_training = self._parse_hpf_bool(role_phased_config.get("enable", False), False)
         mixed_policy_config = hpf_config.get("mixed_policy_grpo", {})
         mixed_policy_grpo = self._parse_hpf_bool(mixed_policy_config.get("enable", False), False)
-        transition_config = mixed_policy_config.get("transition_aware", {})
-        transition_aware_grpo = self._parse_hpf_bool(transition_config.get("enable", False), False)
         if mixed_policy_grpo:
             tree_config = hpf_config.get("tree_rollout", {})
             if not self._parse_hpf_bool(hpf_config.get("enable", False), False) or not self._parse_hpf_bool(
@@ -481,15 +478,6 @@ class RayPPOTrainer:
                     "HPF mixed-policy GRPO defines its own prefix-plus-suffix window; "
                     "disable local_update_window."
                 )
-            if transition_aware_grpo:
-                if float(transition_config.get("coefficient", 1.0)) < 0:
-                    raise ValueError("Transition-aware mixed-policy GRPO coefficient must be non-negative.")
-                if self.config.actor_rollout_ref.actor.policy_loss.get("loss_mode", "vanilla") != "vanilla":
-                    raise ValueError("Transition-aware mixed-policy GRPO currently requires vanilla PPO clipping.")
-                if self.config.algorithm.get("rollout_correction", None) is not None:
-                    raise ValueError("Transition-aware mixed-policy GRPO does not support rollout correction.")
-        elif transition_aware_grpo:
-            raise ValueError("Transition-aware GRPO requires mixed_policy_grpo.enable=True.")
         if role_phased_training:
             follower_epochs = int(role_phased_config.get("follower_epochs", 1))
             leader_epochs = int(role_phased_config.get("leader_epochs", 1))
@@ -1452,12 +1440,6 @@ class RayPPOTrainer:
         progress_label: str | None = None,
         progress_log_interval: int | None = None,
         temperature: float | None = None,
-        ppo_epochs_override: int | None = None,
-        mini_batch_size_override: int | None = None,
-        shuffle_override: bool | None = None,
-        step_lr_scheduler: bool = True,
-        transition_current_weight: float | None = None,
-        transition_next_weight: float | None = None,
     ) -> DataProto:
         rollout_config = self.config.actor_rollout_ref.rollout
         batch.meta_info["multi_turn"] = rollout_config.multi_turn.enable
@@ -1480,15 +1462,9 @@ class RayPPOTrainer:
         )
         ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
         ppo_mini_batch_size = ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
-        if mini_batch_size_override is not None:
-            ppo_mini_batch_size = int(mini_batch_size_override)
-        ppo_epochs = (
-            self.config.actor_rollout_ref.actor.ppo_epochs
-            if ppo_epochs_override is None
-            else int(ppo_epochs_override)
-        )
+        ppo_epochs = self.config.actor_rollout_ref.actor.ppo_epochs
         seed = self.config.actor_rollout_ref.actor.data_loader_seed
-        shuffle = self.config.actor_rollout_ref.actor.shuffle if shuffle_override is None else bool(shuffle_override)
+        shuffle = self.config.actor_rollout_ref.actor.shuffle
         actor_update_metadata = dict(
             calculate_entropy=calculate_entropy,
             distillation_use_topk=distillation_use_topk,
@@ -1498,15 +1474,7 @@ class RayPPOTrainer:
             seed=seed,
             dataloader_kwargs={"shuffle": shuffle},
             compute_loss=True,
-            step_lr_scheduler=step_lr_scheduler,
         )
-        if transition_current_weight is not None or transition_next_weight is not None:
-            actor_update_metadata.update(
-                hpf_transition_aware=True,
-                hpf_transition_current_weight=float(transition_current_weight or 0.0),
-                hpf_transition_next_weight=float(transition_next_weight or 0.0),
-                force_group_size=2,
-            )
         if progress_label is not None:
             actor_update_metadata["progress_label"] = progress_label
             actor_update_metadata["progress_log_interval"] = (
@@ -1849,216 +1817,6 @@ class RayPPOTrainer:
         metrics["timing_s/hpf/mixed_policy_grpo_update_actor"] = float(elapsed)
         actor_metrics = reduce_metrics(actor_output.meta_info["metrics"])
         metrics.update(rename_dict(actor_metrics, "hpf/mixed_policy_grpo/"))
-        return DataProto.from_single_dict(data={}, meta_info={"metrics": metrics})
-
-    def _prepare_hpf_transition_cut_batch(
-        self,
-        batch: DataProto,
-        *,
-        round_index: int,
-        response_length: int,
-    ) -> tuple[DataProto, dict[str, float]]:
-        hpf_config = self.config.algorithm.get("hpf_rlvr", {})
-        tree_config = hpf_config.get("tree_rollout", {})
-        progressive_block_size = int(hpf_config.get("progressive_block_size", 256))
-        max_response_length = int(hpf_config.get("max_response_length", self.config.data.max_response_length))
-        full_suffix_tail = self._parse_hpf_bool(
-            hpf_config.get("mixed_policy_grpo", {}).get("full_suffix_tail", False), False
-        )
-        mixed = build_hpf_mixed_policy_grpo_batch(
-            batch=batch,
-            round_index=round_index,
-            progressive_block_size=progressive_block_size,
-            max_response_length=max_response_length,
-            leader_old_log_probs=batch.batch["hpf_leader_rollout_old_log_probs"],
-            follower_old_log_probs=batch.batch["hpf_follower_rollout_old_log_probs"],
-            full_suffix_tail=full_suffix_tail,
-        )
-        update_batch = mixed.batch
-        tree_log_prob_keys = [
-            key
-            for key in ("hpf_leader_rollout_old_log_probs", "hpf_follower_rollout_old_log_probs")
-            if key in update_batch.batch
-        ]
-        if tree_log_prob_keys:
-            update_batch.pop(batch_keys=tree_log_prob_keys)
-        response_length = self._truncate_hpf_update_batch_response(update_batch, response_length)
-
-        prefix_temperature = float(
-            tree_config.get("prefix_temperature", self.config.actor_rollout_ref.rollout.temperature)
-        )
-        suffix_temperature = float(
-            tree_config.get("suffix_temperature", self.config.actor_rollout_ref.rollout.temperature)
-        )
-        response_mask = update_batch.batch["response_mask"]
-        prefix_mask = mixed.prefix_mask[..., :response_length].bool()
-        suffix_mask = mixed.suffix_mask[..., :response_length].bool()
-        temperature = torch.ones_like(response_mask, dtype=torch.float32)
-        temperature = torch.where(prefix_mask, torch.full_like(temperature, prefix_temperature), temperature)
-        temperature = torch.where(suffix_mask, torch.full_like(temperature, suffix_temperature), temperature)
-        update_batch.batch["temperature"] = temperature
-        update_batch.meta_info.pop("temperature", None)
-        return update_batch, mixed.metrics
-
-    def _hpf_transition_surrogate_value(
-        self,
-        batch: DataProto,
-        log_probs: torch.Tensor,
-    ) -> float:
-        actor_config = self.config.actor_rollout_ref.actor
-        clip_ratio = float(actor_config.clip_ratio)
-        clip_ratio_low = float(actor_config.clip_ratio_low or clip_ratio)
-        clip_ratio_high = float(actor_config.clip_ratio_high or clip_ratio)
-        value = compute_hpf_clipped_grpo_surrogate(
-            log_probs=log_probs,
-            old_log_probs=batch.batch["old_log_probs"],
-            advantages=batch.batch["advantages"],
-            mask=batch.batch["hpf_pg_mask"],
-            clip_ratio_low=clip_ratio_low,
-            clip_ratio_high=clip_ratio_high,
-            clip_ratio_c=float(actor_config.get("clip_ratio_c", 3.0)),
-            loss_agg_mode=str(actor_config.loss_agg_mode),
-            loss_scale_factor=actor_config.loss_scale_factor,
-        )
-        return float(value.detach().cpu().item())
-
-    def _update_actor_hpf_transition_aware_grpo(
-        self,
-        current_batch: DataProto,
-        next_batch: DataProto,
-        *,
-        hpf_round_index: int,
-        empirical_transition: float,
-    ) -> DataProto:
-        """Optimize the paired current/next-cut transition-aware GRPO objective."""
-        hpf_config = self.config.algorithm.get("hpf_rlvr", {})
-        mixed_config = hpf_config.get("mixed_policy_grpo", {})
-        transition_config = mixed_config.get("transition_aware", {})
-        coefficient = float(transition_config.get("coefficient", 1.0))
-        progressive_block_size = int(hpf_config.get("progressive_block_size", 256))
-        max_response_length = int(hpf_config.get("max_response_length", self.config.data.max_response_length))
-        next_round_index = int(hpf_round_index) + 1
-        current_horizon = min(int(hpf_round_index) * progressive_block_size, max_response_length)
-        next_horizon = min(next_round_index * progressive_block_size, max_response_length)
-        if next_horizon <= current_horizon:
-            return self._update_actor_hpf_mixed_policy_grpo(
-                current_batch,
-                hpf_round_index=hpf_round_index,
-            )
-
-        full_suffix_tail = self._parse_hpf_bool(mixed_config.get("full_suffix_tail", False), False)
-        response_length = max_response_length if full_suffix_tail else min(2 * next_horizon, max_response_length)
-        current_update, current_metrics = self._prepare_hpf_transition_cut_batch(
-            current_batch, round_index=int(hpf_round_index), response_length=response_length
-        )
-        next_update, next_metrics = self._prepare_hpf_transition_cut_batch(
-            next_batch, round_index=next_round_index, response_length=response_length
-        )
-        if len(current_update) != len(next_update):
-            raise ValueError(
-                "Transition-aware mixed-policy GRPO requires equal current/next batch sizes, "
-                f"got {len(current_update)} and {len(next_update)}."
-            )
-
-        mini_batch_size = int(self.config.actor_rollout_ref.actor.ppo_mini_batch_size) * int(
-            self.config.actor_rollout_ref.rollout.n
-        )
-        current_update, current_pad = pad_dataproto_to_divisor(current_update, mini_batch_size)
-        next_update, next_pad = pad_dataproto_to_divisor(next_update, mini_batch_size)
-        if current_pad != next_pad:
-            raise ValueError(f"Transition cut padding differs: current={current_pad}, next={next_pad}.")
-        current_baseline = self._hpf_transition_surrogate_value(
-            current_update, current_update.batch["old_log_probs"]
-        )
-        next_baseline = self._hpf_transition_surrogate_value(next_update, next_update.batch["old_log_probs"])
-        current_update.batch["hpf_transition_cut"] = torch.zeros(len(current_update), dtype=torch.long)
-        next_update.batch["hpf_transition_cut"] = torch.ones(len(next_update), dtype=torch.long)
-        combined_update = DataProto.concat([current_update, next_update])
-        pair_count = len(current_update)
-        pair_indices = torch.stack(
-            [torch.arange(pair_count), torch.arange(pair_count) + pair_count], dim=1
-        ).reshape(-1)
-        combined_update.reorder(pair_indices)
-
-        ppo_epochs = int(self.config.actor_rollout_ref.actor.ppo_epochs)
-        metrics = {
-            "hpf/transition_aware_enabled": 1.0,
-            "hpf/transition_coefficient": coefficient,
-            "hpf/transition_empirical": float(empirical_transition),
-            "hpf/transition_current_horizon": float(current_horizon),
-            "hpf/transition_next_horizon": float(next_horizon),
-            "hpf/transition_current_behavior_surrogate": current_baseline,
-            "hpf/transition_next_behavior_surrogate": next_baseline,
-            "hpf/transition_pad_size": float(current_pad),
-        }
-        metrics.update(
-            {
-                f"hpf/transition_current/{key.removeprefix('hpf/')}": value
-                for key, value in current_metrics.items()
-            }
-        )
-        metrics.update(
-            {
-                f"hpf/transition_next/{key.removeprefix('hpf/')}": value
-                for key, value in next_metrics.items()
-            }
-        )
-
-        actor_metric_values: dict[str, list] = {}
-        update_start = time.perf_counter()
-        for inner_epoch in range(ppo_epochs):
-            if inner_epoch == 0:
-                current_value = current_baseline
-                next_value = next_baseline
-            else:
-                current_log_prob, _ = self._compute_old_log_prob(current_update, calculate_entropy=False)
-                next_log_prob, _ = self._compute_old_log_prob(next_update, calculate_entropy=False)
-                current_value = self._hpf_transition_surrogate_value(
-                    current_update, current_log_prob.batch["old_log_probs"]
-                )
-                next_value = self._hpf_transition_surrogate_value(next_update, next_log_prob.batch["old_log_probs"])
-            transition_surrogate = (
-                float(empirical_transition)
-                + (next_value - next_baseline)
-                - (current_value - current_baseline)
-            )
-            penalty_active = transition_surrogate < 0.0
-            current_weight = 1.0 - coefficient if penalty_active else 1.0
-            next_weight = coefficient if penalty_active else 0.0
-            metrics[f"hpf/transition_surrogate_epoch_{inner_epoch + 1}"] = transition_surrogate
-            metrics[f"hpf/transition_penalty_active_epoch_{inner_epoch + 1}"] = float(penalty_active)
-            print(
-                "[HPF] transition-aware GRPO inner epoch "
-                f"step={self.global_steps} epoch={inner_epoch + 1}/{ppo_epochs} "
-                f"empirical={empirical_transition:.6f} surrogate={transition_surrogate:.6f} "
-                f"active={penalty_active} weights=({current_weight:.4f},{next_weight:.4f})",
-                flush=True,
-            )
-            actor_output = self._update_actor(
-                combined_update,
-                progress_label=(
-                    f"hpf/transition-aware/step-{self.global_steps}/epoch-{inner_epoch + 1}"
-                ),
-                progress_log_interval=int(hpf_config.get("progress_log_interval", 1)),
-                ppo_epochs_override=1,
-                mini_batch_size_override=2 * mini_batch_size,
-                shuffle_override=False,
-                step_lr_scheduler=inner_epoch + 1 == ppo_epochs,
-                transition_current_weight=current_weight,
-                transition_next_weight=next_weight,
-            )
-            epoch_metrics = reduce_metrics(actor_output.meta_info["metrics"])
-            for key, value in epoch_metrics.items():
-                actor_metric_values.setdefault(key, []).append(value)
-
-        elapsed = time.perf_counter() - update_start
-        metrics["timing_s/hpf/transition_aware_update_actor"] = float(elapsed)
-        for key, values in actor_metric_values.items():
-            metrics[f"hpf/transition_aware/{key}"] = float(np.mean(values))
-        print(
-            f"[HPF] transition-aware GRPO actor update done step={self.global_steps} elapsed_s={elapsed:.2f}",
-            flush=True,
-        )
         return DataProto.from_single_dict(data={}, meta_info={"metrics": metrics})
 
     def _update_actor_hpf_masked_grpo(
@@ -2776,9 +2534,6 @@ class RayPPOTrainer:
         mixed_policy_grpo = self._parse_hpf_bool(
             hpf_config.get("mixed_policy_grpo", {}).get("enable", False), False
         )
-        transition_aware_grpo = self._parse_hpf_bool(
-            hpf_config.get("mixed_policy_grpo", {}).get("transition_aware", {}).get("enable", False), False
-        )
         physical_total_epochs = int(self.config.trainer.total_epochs)
         if role_phased_training:
             follower_phase_epochs = int(role_phased_config.get("follower_epochs", 1))
@@ -2869,17 +2624,6 @@ class RayPPOTrainer:
                     if use_hpf_tree_rollout
                     else None
                 )
-                transition_next_round_index = None
-                transition_has_next_cut = False
-                if transition_aware_grpo and hpf_round_index is not None:
-                    progressive_block_size = int(hpf_config.get("progressive_block_size", 256))
-                    max_response_length = int(
-                        hpf_config.get("max_response_length", self.config.data.max_response_length)
-                    )
-                    current_horizon = min(int(hpf_round_index) * progressive_block_size, max_response_length)
-                    transition_next_round_index = int(hpf_round_index) + 1
-                    next_horizon = min(transition_next_round_index * progressive_block_size, max_response_length)
-                    transition_has_next_cut = next_horizon > current_horizon
                 effective_rollout_n = rollout_n
                 fresh_num_prefixes = None
                 fresh_num_suffixes = None
@@ -2935,28 +2679,6 @@ class RayPPOTrainer:
                             metrics.update(hpf_tree_metrics)
                             timing_raw.update(gen_batch_output.meta_info["timing"])
                             gen_batch_output.meta_info.pop("timing", None)
-                            transition_next_gen_output = None
-                            if transition_has_next_cut:
-                                transition_next_gen_output, next_tree_metrics = self._generate_hpf_tree_sequences(
-                                    gen_batch,
-                                    hpf_round_index=transition_next_round_index,
-                                    num_prefixes=fresh_num_prefixes,
-                                    num_suffixes=fresh_num_suffixes,
-                                    require_rollout_n_match=role_phase != "leader",
-                                )
-                                metrics.update(
-                                    {
-                                        f"hpf/transition_next_cut/{key.removeprefix('hpf/')}": value
-                                        for key, value in next_tree_metrics.items()
-                                    }
-                                )
-                                timing_raw.update(
-                                    {
-                                        f"transition_next_cut/{key}": value
-                                        for key, value in transition_next_gen_output.meta_info["timing"].items()
-                                    }
-                                )
-                                transition_next_gen_output.meta_info.pop("timing", None)
                         else:
                             combined_gen_output = self.async_rollout_manager.generate_sequences(combined_gen_batch)
                         self.checkpoint_manager.sleep_replicas()
@@ -2991,32 +2713,17 @@ class RayPPOTrainer:
                         del combined_gen_batch, combined_gen_output
                     # repeat to align with repeated responses in rollout
                     prompt_batch_for_hpf = batch
-                    transition_next_batch = None
-                    if transition_has_next_cut:
-                        transition_next_batch = batch.repeat(repeat_times=effective_rollout_n, interleave=True)
-                        transition_next_batch = transition_next_batch.union(transition_next_gen_output)
                     batch = batch.repeat(repeat_times=effective_rollout_n, interleave=True)
                     batch = batch.union(gen_batch_output)
 
                     if "response_mask" not in batch.batch.keys():
                         batch.batch["response_mask"] = compute_response_mask(batch)
-                    if transition_next_batch is not None and "response_mask" not in transition_next_batch.batch.keys():
-                        transition_next_batch.batch["response_mask"] = compute_response_mask(transition_next_batch)
                     # Balance the number of valid tokens across DP ranks.
                     # NOTE: This usually changes the order of data in the `batch`,
                     # which won't affect the advantage calculation (since it's based on uid),
                     # but might affect the loss calculation (due to the change of mini-batching).
                     if self.config.trainer.balance_batch:
                         self._balance_batch(batch, metrics=metrics)
-                        if transition_next_batch is not None:
-                            next_balance_metrics = {}
-                            self._balance_batch(transition_next_batch, metrics=next_balance_metrics)
-                            metrics.update(
-                                {
-                                    f"hpf/transition_next_cut/{key}": value
-                                    for key, value in next_balance_metrics.items()
-                                }
-                            )
 
                     # compute global_valid tokens
                     batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
@@ -3035,15 +2742,6 @@ class RayPPOTrainer:
 
                         # extract reward_tensor and reward_extra_infos_dict for training
                         reward_tensor, reward_extra_infos_dict = extract_reward(batch)
-                        transition_next_reward_tensor = None
-                        transition_next_reward_extra_infos_dict = {}
-                        if transition_next_batch is not None:
-                            if self.use_rm and "rm_scores" not in transition_next_batch.batch.keys():
-                                next_batch_reward = self._compute_reward_colocate(transition_next_batch)
-                                transition_next_batch = transition_next_batch.union(next_batch_reward)
-                            transition_next_reward_tensor, transition_next_reward_extra_infos_dict = extract_reward(
-                                transition_next_batch
-                            )
 
                     # Operating Mode Selection:
                     # - Bypass mode: Sets old_log_probs = rollout_log_probs (2 policies: π_rollout, π_θ)
@@ -3167,27 +2865,6 @@ class RayPPOTrainer:
                                 norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                                 config=self.config.algorithm,
                             )
-                            if transition_next_batch is not None:
-                                transition_next_batch.batch["token_level_scores"] = transition_next_reward_tensor
-                                if transition_next_reward_extra_infos_dict:
-                                    transition_next_batch.non_tensor_batch.update(
-                                        {
-                                            key: np.array(value)
-                                            for key, value in transition_next_reward_extra_infos_dict.items()
-                                        }
-                                    )
-                                transition_next_batch.batch["token_level_rewards"] = transition_next_batch.batch[
-                                    "token_level_scores"
-                                ]
-                                transition_next_batch = compute_advantage(
-                                    transition_next_batch,
-                                    adv_estimator=self.config.algorithm.adv_estimator,
-                                    gamma=self.config.algorithm.gamma,
-                                    lam=self.config.algorithm.lam,
-                                    num_repeat=effective_rollout_n,
-                                    norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
-                                    config=self.config.algorithm,
-                                )
 
                     # update critic
                     if self.use_critic:
@@ -3204,22 +2881,10 @@ class RayPPOTrainer:
                         # update actor
                         with marked_timer("update_actor", timing_raw, color="red"):
                             if mixed_policy_grpo:
-                                if transition_next_batch is not None:
-                                    empirical_transition = float(
-                                        transition_next_reward_tensor.sum(dim=-1).float().mean().item()
-                                        - reward_tensor.sum(dim=-1).float().mean().item()
-                                    )
-                                    actor_output = self._update_actor_hpf_transition_aware_grpo(
-                                        batch,
-                                        transition_next_batch,
-                                        hpf_round_index=hpf_round_index,
-                                        empirical_transition=empirical_transition,
-                                    )
-                                else:
-                                    actor_output = self._update_actor_hpf_mixed_policy_grpo(
-                                        batch,
-                                        hpf_round_index=hpf_round_index,
-                                    )
+                                actor_output = self._update_actor_hpf_mixed_policy_grpo(
+                                    batch,
+                                    hpf_round_index=hpf_round_index,
+                                )
                             elif self.config.algorithm.get("hpf_rlvr", {}).get("enable", False):
                                 actor_output = self._update_actor_hpf_masked_grpo(
                                     batch,

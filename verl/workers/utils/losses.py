@@ -91,23 +91,6 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     use_hpf_pg_mask = "hpf_pg_mask" in data
     if use_hpf_pg_mask:
         fields.append("hpf_pg_mask")
-    transition_aware = bool(tu.get_non_tensor_data(data=data, key="hpf_transition_aware", default=False))
-    if transition_aware:
-        fields.append("hpf_transition_cut")
-        transition_current_weight = float(
-            tu.get_non_tensor_data(data=data, key="hpf_transition_current_weight", default=1.0)
-        )
-        transition_next_weight = float(
-            tu.get_non_tensor_data(data=data, key="hpf_transition_next_weight", default=0.0)
-        )
-        transition_current_num_tokens = tu.get_non_tensor_data(
-            data=data, key="hpf_transition_current_num_tokens"
-        )
-        transition_next_num_tokens = tu.get_non_tensor_data(data=data, key="hpf_transition_next_num_tokens")
-        transition_current_batch_size = tu.get_non_tensor_data(
-            data=data, key="hpf_transition_current_batch_size"
-        )
-        transition_next_batch_size = tu.get_non_tensor_data(data=data, key="hpf_transition_next_batch_size")
     hpf_kl_coef = float(tu.get_non_tensor_data(data=data, key="hpf_kl_coef", default=0.0) or 0.0)
     hpf_kl_type = tu.get_non_tensor_data(data=data, key="hpf_kl_type", default=config.kl_loss_type)
     if hpf_kl_coef > 0:
@@ -126,56 +109,15 @@ def ppo_loss(config: ActorConfig, model_output, data: TensorDict, dp_group=None)
     loss_mode = config.policy_loss.get("loss_mode", "vanilla")
 
     policy_loss_fn = get_policy_loss_fn(loss_mode)
-    if transition_aware:
-        if rollout_is_weights is not None:
-            raise ValueError("Transition-aware mixed-policy GRPO does not support rollout correction weights.")
-        transition_cut = data["hpf_transition_cut"].to(torch.long).unsqueeze(-1)
-        current_mask = pg_mask & (transition_cut == 0)
-        next_mask = pg_mask & (transition_cut == 1)
-        global_info = dict(config.global_batch_info)
-
-        def _cut_loss(cut_mask, num_tokens, batch_size):
-            cut_global_info = dict(global_info)
-            cut_global_info["batch_num_tokens"] = num_tokens
-            cut_global_info["global_batch_size"] = batch_size
-            config.global_batch_info = cut_global_info
-            return policy_loss_fn(
-                old_log_prob=old_log_prob,
-                log_prob=log_prob,
-                advantages=advantages,
-                response_mask=cut_mask,
-                loss_agg_mode=loss_agg_mode,
-                config=config,
-                rollout_is_weights=None,
-            )
-
-        current_loss, current_metrics = _cut_loss(
-            current_mask, transition_current_num_tokens, transition_current_batch_size
-        )
-        next_loss, next_metrics = _cut_loss(
-            next_mask, transition_next_num_tokens, transition_next_batch_size
-        )
-        config.global_batch_info = global_info
-        pg_loss = transition_current_weight * current_loss + transition_next_weight * next_loss
-        pg_metrics = {
-            "actor/pg_clipfrac": current_metrics["actor/pg_clipfrac"],
-            "actor/ppo_kl": current_metrics["actor/ppo_kl"],
-            "actor/pg_clipfrac_lower": current_metrics["actor/pg_clipfrac_lower"],
-            "actor/transition_current_pg_loss": current_loss.detach().item(),
-            "actor/transition_next_pg_loss": next_loss.detach().item(),
-            "actor/transition_next_pg_clipfrac": next_metrics["actor/pg_clipfrac"],
-            "actor/transition_next_ppo_kl": next_metrics["actor/ppo_kl"],
-        }
-    else:
-        pg_loss, pg_metrics = policy_loss_fn(
-            old_log_prob=old_log_prob,
-            log_prob=log_prob,
-            advantages=advantages,
-            response_mask=pg_mask,
-            loss_agg_mode=loss_agg_mode,
-            config=config,
-            rollout_is_weights=rollout_is_weights,
-        )
+    pg_loss, pg_metrics = policy_loss_fn(
+        old_log_prob=old_log_prob,
+        log_prob=log_prob,
+        advantages=advantages,
+        response_mask=pg_mask,
+        loss_agg_mode=loss_agg_mode,
+        config=config,
+        rollout_is_weights=rollout_is_weights,
+    )
 
     # AggregationType.MEAN for pg metrics: assumes policy_loss_fn normalizes by local_bsz/local_tokens
     # Ex: in compute_policy_loss_vanilla, pg_metrics are pg_clipfrac, ppo_kl, pg_clipfrac_lower

@@ -206,44 +206,6 @@ def build_hpf_mixed_policy_grpo_batch(
     )
 
 
-def compute_hpf_clipped_grpo_surrogate(
-    *,
-    log_probs: torch.Tensor,
-    old_log_probs: torch.Tensor,
-    advantages: torch.Tensor,
-    mask: torch.Tensor,
-    clip_ratio_low: float,
-    clip_ratio_high: float,
-    clip_ratio_c: float,
-    loss_agg_mode: str,
-    loss_scale_factor: float | None = None,
-) -> torch.Tensor:
-    """Return the positive clipped GRPO surrogate for transition estimation."""
-    mask = mask.bool()
-    log_ratio = (log_probs - old_log_probs).clamp(min=-20.0, max=20.0)
-    ratio = torch.exp(log_ratio)
-    objective = advantages * ratio
-    clipped_objective = advantages * torch.clamp(ratio, 1.0 - clip_ratio_low, 1.0 + clip_ratio_high)
-    objective = torch.minimum(objective, clipped_objective)
-    objective = torch.where(advantages < 0, torch.maximum(objective, advantages * clip_ratio_c), objective)
-
-    if loss_agg_mode == "token-mean":
-        return (objective * mask).sum() / mask.sum().clamp_min(1)
-
-    sequence_mask = mask.sum(dim=-1)
-    valid_sequences = sequence_mask > 0
-    if loss_agg_mode == "seq-mean-token-mean":
-        sequence_objective = (objective * mask).sum(dim=-1) / sequence_mask.clamp_min(1)
-    elif loss_agg_mode in ("seq-mean-token-sum", "seq-mean-token-sum-norm"):
-        sequence_objective = (objective * mask).sum(dim=-1)
-        if loss_agg_mode == "seq-mean-token-sum-norm":
-            normalizer = float(loss_scale_factor) if loss_scale_factor is not None else float(mask.shape[-1])
-            sequence_objective = sequence_objective / normalizer
-    else:
-        raise ValueError(f"Unsupported transition-aware loss aggregation mode: {loss_agg_mode}")
-    return sequence_objective[valid_sequences].mean() if valid_sequences.any() else objective.new_zeros(())
-
-
 def _masked_sequence_correction(
     updated_log_probs: torch.Tensor,
     old_log_probs: torch.Tensor,
