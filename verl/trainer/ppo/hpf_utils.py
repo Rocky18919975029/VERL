@@ -137,37 +137,44 @@ def _clone_for_masked_update(
 
 def build_hpf_mixed_policy_grpo_batch(
     batch: DataProto,
-    round_index: int,
-    progressive_block_size: int,
-    max_response_length: int,
+    prefix_horizon: int,
+    suffix_window_size: int | None,
     leader_old_log_probs: torch.Tensor,
     follower_old_log_probs: torch.Tensor,
-    full_suffix_tail: bool = False,
 ) -> HPFMaskedBatch:
     """Build one GRPO update under a position-dependent mixed policy.
 
     The rollout reward and GRPO advantage come from the complete trajectory.
-    By default, policy-gradient tokens are limited to the sampled prefix and
-    the next ``horizon`` suffix tokens. When ``full_suffix_tail`` is enabled,
-    every valid response token after the prefix is trained instead. The PPO
-    anchor uses the high-temperature prefix policy on prefix tokens and the
-    low-temperature follower policy on suffix tokens.
+    ``prefix_horizon`` determines the high/low-temperature cut independently
+    from ``suffix_window_size``. When the suffix window is ``None``, every
+    valid response token after the prefix is trained. The PPO anchor uses the
+    high-temperature prefix policy on prefix tokens and the low-temperature
+    follower policy on suffix tokens.
     """
     if "response_mask" not in batch.batch:
         raise ValueError("response_mask is required before building HPF masks")
     if "advantages" not in batch.batch:
         raise ValueError("advantages are required before building mixed-policy GRPO")
+    if prefix_horizon < 0:
+        raise ValueError(f"prefix_horizon must be non-negative, got {prefix_horizon}.")
+    if suffix_window_size is not None and suffix_window_size <= 0:
+        raise ValueError(f"suffix_window_size must be positive or None, got {suffix_window_size}.")
 
-    horizon, prefix_lengths, prefix_mask, full_suffix_mask = _compute_horizon_masks(
-        batch, round_index, progressive_block_size, max_response_length
-    )
     response_mask = batch.batch["response_mask"]
     response_len = response_mask.shape[-1]
+    prefix_horizon = min(int(prefix_horizon), response_len)
+    prefix_lengths = torch.full(
+        (response_mask.shape[0],), prefix_horizon, dtype=torch.long, device=response_mask.device
+    )
+    prefix_lengths = torch.minimum(prefix_lengths, response_mask.sum(dim=-1).long())
+    prefix_mask, full_suffix_mask = _make_prefix_suffix_masks(response_mask, prefix_lengths)
     positions = torch.arange(response_len, device=response_mask.device).unsqueeze(0)
-    suffix_ends = (prefix_lengths + horizon).clamp(max=response_len).unsqueeze(1)
-    suffix_window_mask = full_suffix_mask.bool() & (positions < suffix_ends)
-    suffix_window_mask = suffix_window_mask.to(response_mask.dtype)
-    suffix_update_mask = full_suffix_mask if full_suffix_tail else suffix_window_mask
+    if suffix_window_size is None:
+        suffix_update_mask = full_suffix_mask
+    else:
+        suffix_ends = (prefix_lengths + int(suffix_window_size)).clamp(max=response_len).unsqueeze(1)
+        suffix_update_mask = full_suffix_mask.bool() & (positions < suffix_ends)
+        suffix_update_mask = suffix_update_mask.to(response_mask.dtype)
     update_mask = (prefix_mask.bool() | suffix_update_mask.bool()).to(response_mask.dtype)
 
     mixed_old_log_probs = torch.where(
@@ -189,8 +196,14 @@ def build_hpf_mixed_policy_grpo_batch(
     suffix_nonempty = suffix_update_mask.sum(dim=-1) > 0
     metrics = {
         "hpf/mixed_policy_grpo_enabled": 1.0,
-        "hpf/mixed_policy_grpo_full_suffix_tail": float(full_suffix_tail),
-        "hpf/mixed_policy_grpo_horizon_tokens": float(horizon),
+        "hpf/mixed_policy_grpo_full_suffix_tail": float(suffix_window_size is None),
+        # Compatibility alias for existing dashboards; this is the prefix cut,
+        # not the independently configured suffix-window length.
+        "hpf/mixed_policy_grpo_horizon_tokens": float(prefix_horizon),
+        "hpf/mixed_policy_grpo_prefix_horizon_tokens": float(prefix_horizon),
+        "hpf/mixed_policy_grpo_suffix_window_size": float(
+            suffix_window_size if suffix_window_size is not None else -1
+        ),
         "hpf/mixed_policy_grpo_prefix_tokens_mean": float(prefix_mask.sum(dim=-1).float().mean().item()),
         "hpf/mixed_policy_grpo_suffix_tokens_mean": float(
             suffix_update_mask.sum(dim=-1).float().mean().item()

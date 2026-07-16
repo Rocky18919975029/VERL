@@ -182,11 +182,12 @@ algorithm:
     # Disabled by default to preserve all existing HPF branches.
     mixed_policy_grpo:
 
-      # Whether to train prefix plus one horizon-length suffix window in one update.
+      # Whether to train the mixed-temperature prefix and suffix in one update.
       enable: False
 
-      # Train every valid token after the prefix instead of one horizon-length suffix window.
-      full_suffix_tail: False
+      # Number of suffix tokens to train after the prefix horizon. Null trains
+      # every valid token in the remaining tail.
+      suffix_window_size: null
 
     # Two-stage prefix-follower rollout construction. Disabled by default so
     # existing GRPO and masked HPF smoke paths remain unchanged.

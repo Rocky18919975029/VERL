@@ -149,7 +149,7 @@ echo "HPF fresh tree num suffixes: ${HPF_FRESH_TREE_NUM_SUFFIXES:-${HPF_TREE_NUM
 echo "HPF fresh leader tree: ${HPF_FRESH_LEADER_TREE:-False}"
 echo "HPF role-phased training: ${HPF_ROLE_PHASED_TRAINING:-False}"
 echo "HPF mixed-policy GRPO: ${HPF_MIXED_POLICY_GRPO:-False}"
-echo "HPF mixed-policy full suffix tail: ${HPF_MIXED_POLICY_FULL_SUFFIX_TAIL:-False}"
+echo "HPF mixed-policy suffix window size: ${HPF_MIXED_POLICY_SUFFIX_WINDOW_SIZE:-null}"
 echo "HPF follower phase epochs: ${HPF_FOLLOWER_PHASE_EPOCHS:-1}"
 echo "HPF leader phase epochs: ${HPF_LEADER_PHASE_EPOCHS:-1}"
 

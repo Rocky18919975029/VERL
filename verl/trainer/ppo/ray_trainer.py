@@ -478,6 +478,13 @@ class RayPPOTrainer:
                     "HPF mixed-policy GRPO defines its own prefix-plus-suffix window; "
                     "disable local_update_window."
                 )
+            suffix_window_size = mixed_policy_config.get("suffix_window_size", None)
+            if suffix_window_size is not None and str(suffix_window_size).lower() != "null":
+                if int(suffix_window_size) <= 0:
+                    raise ValueError(
+                        "HPF mixed-policy GRPO suffix_window_size must be positive or null, "
+                        f"got {suffix_window_size}."
+                    )
         if role_phased_training:
             follower_epochs = int(role_phased_config.get("follower_epochs", 1))
             leader_epochs = int(role_phased_config.get("leader_epochs", 1))
@@ -1719,6 +1726,7 @@ class RayPPOTrainer:
         """Run one masked GRPO update under the tree rollout's mixed policy."""
         hpf_config = self.config.algorithm.get("hpf_rlvr", {})
         tree_config = hpf_config.get("tree_rollout", {})
+        mixed_policy_config = hpf_config.get("mixed_policy_grpo", {})
         progressive_block_size = int(hpf_config.get("progressive_block_size", 256))
         max_response_length = int(hpf_config.get("max_response_length", self.config.data.max_response_length))
         prefix_temperature = float(
@@ -1727,11 +1735,20 @@ class RayPPOTrainer:
         suffix_temperature = float(
             tree_config.get("suffix_temperature", self.config.actor_rollout_ref.rollout.temperature)
         )
-        full_suffix_tail = self._parse_hpf_bool(
-            hpf_config.get("mixed_policy_grpo", {}).get("full_suffix_tail", False), False
+        suffix_window_size_value = mixed_policy_config.get("suffix_window_size", None)
+        suffix_window_size = (
+            None
+            if suffix_window_size_value is None or str(suffix_window_size_value).lower() == "null"
+            else int(suffix_window_size_value)
         )
+        if suffix_window_size is not None and suffix_window_size <= 0:
+            raise ValueError(
+                "hpf_rlvr.mixed_policy_grpo.suffix_window_size must be positive or null, "
+                f"got {suffix_window_size}."
+            )
         if hpf_round_index is None:
             hpf_round_index = self._get_hpf_round_index(None)
+        prefix_horizon = min(int(hpf_round_index) * progressive_block_size, max_response_length)
         if (
             "hpf_leader_rollout_old_log_probs" not in batch.batch
             or "hpf_follower_rollout_old_log_probs" not in batch.batch
@@ -1740,12 +1757,10 @@ class RayPPOTrainer:
 
         mixed = build_hpf_mixed_policy_grpo_batch(
             batch=batch,
-            round_index=hpf_round_index,
-            progressive_block_size=progressive_block_size,
-            max_response_length=max_response_length,
+            prefix_horizon=prefix_horizon,
+            suffix_window_size=suffix_window_size,
             leader_old_log_probs=batch.batch["hpf_leader_rollout_old_log_probs"],
             follower_old_log_probs=batch.batch["hpf_follower_rollout_old_log_probs"],
-            full_suffix_tail=full_suffix_tail,
         )
         update_batch = mixed.batch
         tree_log_prob_keys = [
@@ -1756,11 +1771,10 @@ class RayPPOTrainer:
         if tree_log_prob_keys:
             update_batch.pop(batch_keys=tree_log_prob_keys)
         response_len_before = update_batch.batch["responses"].shape[-1]
-        horizon = min(hpf_round_index * progressive_block_size, max_response_length, response_len_before)
-        if full_suffix_tail:
+        if suffix_window_size is None:
             update_length = int(update_batch.batch["response_mask"].sum(dim=-1).max().item())
         else:
-            update_length = 2 * horizon
+            update_length = prefix_horizon + suffix_window_size
         response_len_after = self._truncate_hpf_update_batch_response(update_batch, update_length)
 
         response_mask = update_batch.batch["response_mask"]
@@ -1785,7 +1799,10 @@ class RayPPOTrainer:
             {
                 "hpf/mixed_policy_grpo_prefix_temperature": prefix_temperature,
                 "hpf/mixed_policy_grpo_suffix_temperature": suffix_temperature,
-                "hpf/mixed_policy_grpo_full_suffix_tail": float(full_suffix_tail),
+                "hpf/mixed_policy_grpo_full_suffix_tail": float(suffix_window_size is None),
+                "hpf/mixed_policy_grpo_suffix_window_size": float(
+                    suffix_window_size if suffix_window_size is not None else -1
+                ),
                 "hpf/mixed_policy_grpo_response_len_before": float(response_len_before),
                 "hpf/mixed_policy_grpo_response_len_after": float(response_len_after),
                 "hpf/mixed_policy_grpo_pad_size": float(pad_size),
@@ -1797,9 +1814,10 @@ class RayPPOTrainer:
         )
         print(
             "[HPF] mixed-policy GRPO actor update start "
-            f"step={self.global_steps} batch={len(update_batch)} pad={pad_size} horizon={horizon} "
+            f"step={self.global_steps} batch={len(update_batch)} pad={pad_size} "
+            f"prefix_horizon={prefix_horizon} "
             f"response_len={response_len_before}->{response_len_after} "
-            f"full_suffix_tail={full_suffix_tail} "
+            f"suffix_window_size={suffix_window_size} "
             f"prefix_temp={prefix_temperature} suffix_temp={suffix_temperature}",
             flush=True,
         )

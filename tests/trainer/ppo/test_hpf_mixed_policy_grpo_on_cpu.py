@@ -13,7 +13,7 @@ from verl import DataProto
 from verl.trainer.ppo.hpf_utils import build_hpf_mixed_policy_grpo_batch
 
 
-def test_mixed_policy_grpo_uses_prefix_and_one_horizon_suffix_window():
+def test_mixed_policy_grpo_uses_independent_prefix_and_suffix_windows():
     response_mask = torch.tensor(
         [
             [1, 1, 1, 1, 1, 1],
@@ -34,15 +34,14 @@ def test_mixed_policy_grpo_uses_prefix_and_one_horizon_suffix_window():
 
     mixed = build_hpf_mixed_policy_grpo_batch(
         batch=batch,
-        round_index=1,
-        progressive_block_size=2,
-        max_response_length=6,
+        prefix_horizon=2,
+        suffix_window_size=1,
         leader_old_log_probs=leader_log_probs,
         follower_old_log_probs=follower_log_probs,
     )
 
     expected_prefix = torch.tensor([[1, 1, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0]])
-    expected_suffix = torch.tensor([[0, 0, 1, 1, 0, 0], [0, 0, 1, 0, 0, 0]])
+    expected_suffix = torch.tensor([[0, 0, 1, 0, 0, 0], [0, 0, 1, 0, 0, 0]])
     expected_update = expected_prefix.bool() | expected_suffix.bool()
     assert torch.equal(mixed.prefix_mask.bool(), expected_prefix.bool())
     assert torch.equal(mixed.suffix_mask.bool(), expected_suffix.bool())
@@ -66,15 +65,14 @@ def test_mixed_policy_grpo_rejects_missing_standard_advantages():
     with pytest.raises(ValueError, match="advantages are required"):
         build_hpf_mixed_policy_grpo_batch(
             batch=batch,
-            round_index=1,
-            progressive_block_size=2,
-            max_response_length=4,
+            prefix_horizon=2,
+            suffix_window_size=None,
             leader_old_log_probs=log_probs,
             follower_old_log_probs=log_probs,
         )
 
 
-def test_mixed_policy_grpo_can_train_the_full_suffix_tail():
+def test_mixed_policy_grpo_defaults_to_the_full_suffix_tail():
     response_mask = torch.tensor(
         [
             [1, 1, 1, 1, 1, 1],
@@ -95,12 +93,10 @@ def test_mixed_policy_grpo_can_train_the_full_suffix_tail():
 
     mixed = build_hpf_mixed_policy_grpo_batch(
         batch=batch,
-        round_index=1,
-        progressive_block_size=2,
-        max_response_length=6,
+        prefix_horizon=2,
+        suffix_window_size=None,
         leader_old_log_probs=leader_log_probs,
         follower_old_log_probs=follower_log_probs,
-        full_suffix_tail=True,
     )
 
     expected_prefix = torch.tensor([[1, 1, 0, 0, 0, 0], [1, 1, 0, 0, 0, 0]])
