@@ -1284,6 +1284,7 @@ def compute_policy_loss_vanilla(
     loss_agg_mode: str = "token-mean",
     config: Optional[ActorConfig] = None,
     rollout_is_weights: torch.Tensor | None = None,
+    global_batch_info: Optional[dict[str, Any]] = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """
     Compute the clipped policy objective and related metrics for PPO.
@@ -1357,9 +1358,8 @@ def compute_policy_loss_vanilla(
     if rollout_is_weights is not None:
         pg_losses = pg_losses * rollout_is_weights
 
-    pg_loss = agg_loss(
-        loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
-    )
+    aggregation_info = config.global_batch_info if global_batch_info is None else global_batch_info
+    pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **aggregation_info)
 
     pg_metrics = {
         "actor/pg_clipfrac": pg_clipfrac.detach().item(),

@@ -151,6 +151,8 @@ echo "HPF role-phased training: ${HPF_ROLE_PHASED_TRAINING:-False}"
 echo "HPF mixed-policy GRPO: ${HPF_MIXED_POLICY_GRPO:-False}"
 echo "HPF mixed-policy suffix window size: ${HPF_MIXED_POLICY_SUFFIX_WINDOW_SIZE:-null}"
 echo "HPF mixed-policy transition-aware rollout: ${HPF_MIXED_POLICY_TRANSITION_AWARE_ROLLOUT:-False}"
+echo "HPF transition-aware mixed policy optimization: ${HPF_TRANSITION_AWARE_MIXED_POLICY_OPTIMIZATION:-False}"
+echo "HPF transition lambda: ${HPF_TRANSITION_LAMBDA:-1.0}"
 echo "HPF follower phase epochs: ${HPF_FOLLOWER_PHASE_EPOCHS:-1}"
 echo "HPF leader phase epochs: ${HPF_LEADER_PHASE_EPOCHS:-1}"
 

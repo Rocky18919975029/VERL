@@ -4,8 +4,11 @@
 
 import numpy as np
 import pytest
+import torch
 
-from verl.trainer.ppo.hpf_utils import build_hpf_transition_prefix_plan
+from verl import DataProto
+from verl.trainer.ppo.hpf_utils import build_hpf_transition_prefix_plan, estimate_hpf_transition_return
+from verl.workers.utils.losses import _hpf_transition_combine_policy_losses
 
 
 def test_transition_prefix_plan_pairs_current_and_next_cut_requests():
@@ -52,3 +55,67 @@ def test_transition_prefix_plan_rejects_reversed_cuts():
             next_horizon=2,
             max_response_length=8,
         )
+
+
+def test_transition_return_estimate_aligns_paired_rollouts():
+    current = DataProto.from_single_dict(
+        {
+            "dummy": torch.zeros(2, 1),
+            "hpf_transition_pair_uid": np.array(["a", "b"], dtype=object),
+        }
+    )
+    next_cut = DataProto.from_single_dict(
+        {
+            "dummy": torch.zeros(2, 1),
+            "hpf_transition_pair_uid": np.array(["b", "a"], dtype=object),
+        }
+    )
+    estimate = estimate_hpf_transition_return(
+        current,
+        next_cut,
+        current_reward_tensor=torch.tensor([[1.0, 0.0], [2.0, 0.0]]),
+        next_reward_tensor=torch.tensor([[5.0, 0.0], [3.0, 0.0]]),
+    )
+
+    assert estimate.current_mean == pytest.approx(1.5)
+    assert estimate.next_mean == pytest.approx(4.0)
+    assert estimate.delta_mean == pytest.approx(2.5)
+
+
+def test_transition_policy_loss_uses_current_once_when_hinge_is_inactive():
+    current = torch.tensor(0.2, requires_grad=True)
+    next_cut = torch.tensor(0.1, requires_grad=True)
+    loss, info = _hpf_transition_combine_policy_losses(
+        current,
+        next_cut,
+        static_offset=0.3,
+        lambda_trans=0.5,
+        dp_size=1,
+        dp_group=None,
+    )
+    loss.backward()
+
+    assert info["active"].item() == 0
+    assert info["objective"].item() == pytest.approx(0.2)
+    assert current.grad.item() == pytest.approx(1.0)
+    assert next_cut.grad.item() == pytest.approx(0.0)
+
+
+def test_transition_policy_loss_adds_next_minus_current_gradient_when_active():
+    current = torch.tensor(0.2, requires_grad=True)
+    next_cut = torch.tensor(0.1, requires_grad=True)
+    loss, info = _hpf_transition_combine_policy_losses(
+        current,
+        next_cut,
+        static_offset=-0.3,
+        lambda_trans=0.5,
+        dp_size=1,
+        dp_group=None,
+    )
+    loss.backward()
+
+    assert info["active"].item() == 1
+    assert info["penalty"].item() == pytest.approx(0.2)
+    assert info["objective"].item() == pytest.approx(0.3)
+    assert current.grad.item() == pytest.approx(0.5)
+    assert next_cut.grad.item() == pytest.approx(0.5)

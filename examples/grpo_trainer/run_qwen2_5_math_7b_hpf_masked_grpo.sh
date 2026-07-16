@@ -26,6 +26,8 @@ HPF_ROLE_PHASED_TRAINING=${HPF_ROLE_PHASED_TRAINING:-False}
 HPF_MIXED_POLICY_GRPO=${HPF_MIXED_POLICY_GRPO:-False}
 HPF_MIXED_POLICY_SUFFIX_WINDOW_SIZE=${HPF_MIXED_POLICY_SUFFIX_WINDOW_SIZE:-null}
 HPF_MIXED_POLICY_TRANSITION_AWARE_ROLLOUT=${HPF_MIXED_POLICY_TRANSITION_AWARE_ROLLOUT:-False}
+HPF_TRANSITION_AWARE_MIXED_POLICY_OPTIMIZATION=${HPF_TRANSITION_AWARE_MIXED_POLICY_OPTIMIZATION:-False}
+HPF_TRANSITION_LAMBDA=${HPF_TRANSITION_LAMBDA:-1.0}
 HPF_FOLLOWER_PHASE_EPOCHS=${HPF_FOLLOWER_PHASE_EPOCHS:-1}
 HPF_LEADER_PHASE_EPOCHS=${HPF_LEADER_PHASE_EPOCHS:-1}
 HPF_PROGRESS_LOG_INTERVAL=${HPF_PROGRESS_LOG_INTERVAL:-1}
@@ -39,6 +41,16 @@ HPF_TREE_SUFFIX_TOP_P=${HPF_TREE_SUFFIX_TOP_P:-1.0}
 HPF_FRESH_TREE_NUM_PREFIXES=${HPF_FRESH_TREE_NUM_PREFIXES:-${HPF_TREE_NUM_PREFIXES}}
 HPF_FRESH_TREE_NUM_SUFFIXES=${HPF_FRESH_TREE_NUM_SUFFIXES:-${HPF_TREE_NUM_SUFFIXES}}
 HPF_LOSS_AGG_MODE=${HPF_LOSS_AGG_MODE:-token-mean}
+
+if [ "${HPF_TRANSITION_AWARE_MIXED_POLICY_OPTIMIZATION}" = "True" ] \
+    || [ "${HPF_TRANSITION_AWARE_MIXED_POLICY_OPTIMIZATION}" = "true" ] \
+    || [ "${HPF_TRANSITION_AWARE_MIXED_POLICY_OPTIMIZATION}" = "1" ]; then
+    if [ "${HPF_MIXED_POLICY_GRPO}" != "True" ] && [ "${HPF_MIXED_POLICY_GRPO}" != "true" ] \
+        && [ "${HPF_MIXED_POLICY_GRPO}" != "1" ]; then
+        echo "Transition-aware mixed policy optimization requires HPF_MIXED_POLICY_GRPO=True." >&2
+        exit 1
+    fi
+fi
 
 if [ "${HPF_ROLE_PHASED_TRAINING}" = "True" ] || [ "${HPF_ROLE_PHASED_TRAINING}" = "true" ] \
     || [ "${HPF_ROLE_PHASED_TRAINING}" = "1" ]; then
@@ -96,6 +108,16 @@ if [ "${HPF_MIXED_POLICY_GRPO}" = "True" ] || [ "${HPF_MIXED_POLICY_GRPO}" = "tr
         echo "HPF mixed-policy GRPO cannot be combined with role-phased training." >&2
         exit 1
     fi
+    if [ "${HPF_TRANSITION_AWARE_MIXED_POLICY_OPTIMIZATION}" = "True" ] \
+        || [ "${HPF_TRANSITION_AWARE_MIXED_POLICY_OPTIMIZATION}" = "true" ] \
+        || [ "${HPF_TRANSITION_AWARE_MIXED_POLICY_OPTIMIZATION}" = "1" ]; then
+        if [ "${HPF_MIXED_POLICY_TRANSITION_AWARE_ROLLOUT}" != "True" ] \
+            && [ "${HPF_MIXED_POLICY_TRANSITION_AWARE_ROLLOUT}" != "true" ] \
+            && [ "${HPF_MIXED_POLICY_TRANSITION_AWARE_ROLLOUT}" != "1" ]; then
+            echo "Transition-aware mixed policy optimization requires transition-aware rollout." >&2
+            exit 1
+        fi
+    fi
 fi
 
 # A suffix KL to theta_F is exactly zero on the first leader optimizer step.
@@ -145,6 +167,8 @@ HPF_ARGS=(
     algorithm.hpf_rlvr.mixed_policy_grpo.enable="${HPF_MIXED_POLICY_GRPO}"
     algorithm.hpf_rlvr.mixed_policy_grpo.suffix_window_size="${HPF_MIXED_POLICY_SUFFIX_WINDOW_SIZE}"
     algorithm.hpf_rlvr.mixed_policy_grpo.transition_aware_rollout.enable="${HPF_MIXED_POLICY_TRANSITION_AWARE_ROLLOUT}"
+    algorithm.hpf_rlvr.mixed_policy_grpo.transition_aware_optimization.enable="${HPF_TRANSITION_AWARE_MIXED_POLICY_OPTIMIZATION}"
+    algorithm.hpf_rlvr.mixed_policy_grpo.transition_aware_optimization.lambda_trans="${HPF_TRANSITION_LAMBDA}"
     algorithm.hpf_rlvr.progress_log_interval="${HPF_PROGRESS_LOG_INTERVAL}"
     actor_rollout_ref.actor.loss_agg_mode="${HPF_LOSS_AGG_MODE}"
 )
