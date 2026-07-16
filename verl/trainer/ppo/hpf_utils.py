@@ -18,7 +18,6 @@ class HPFMaskedBatch:
     metrics: dict[str, float]
     prefix_mask: torch.Tensor | None = None
     suffix_mask: torch.Tensor | None = None
-    bridge_mask: torch.Tensor | None = None
 
 
 def _normalize_group_scores(
@@ -144,7 +143,6 @@ def build_hpf_mixed_policy_grpo_batch(
     leader_old_log_probs: torch.Tensor,
     follower_old_log_probs: torch.Tensor,
     full_suffix_tail: bool = False,
-    bridge_window_size: int = 0,
 ) -> HPFMaskedBatch:
     """Build one GRPO update under a position-dependent mixed policy.
 
@@ -171,8 +169,6 @@ def build_hpf_mixed_policy_grpo_batch(
     suffix_window_mask = suffix_window_mask.to(response_mask.dtype)
     suffix_update_mask = full_suffix_mask if full_suffix_tail else suffix_window_mask
     update_mask = (prefix_mask.bool() | suffix_update_mask.bool()).to(response_mask.dtype)
-    bridge_ends = (prefix_lengths + max(int(bridge_window_size), 0)).clamp(max=response_len).unsqueeze(1)
-    bridge_mask = full_suffix_mask.bool() & (positions < bridge_ends)
 
     mixed_old_log_probs = torch.where(
         prefix_mask.bool(),
@@ -189,15 +185,11 @@ def build_hpf_mixed_policy_grpo_batch(
     # complete-trajectory rewards; only the PG mask limits trained tokens.
     update_batch.batch["advantages"] = batch.batch["advantages"] * update_mask.to(batch.batch["advantages"])
     update_batch.batch["returns"] = update_batch.batch["advantages"]
-    if bridge_window_size > 0:
-        update_batch.batch["hpf_bridge_kl_mask"] = bridge_mask
 
     suffix_nonempty = suffix_update_mask.sum(dim=-1) > 0
     metrics = {
         "hpf/mixed_policy_grpo_enabled": 1.0,
         "hpf/mixed_policy_grpo_full_suffix_tail": float(full_suffix_tail),
-        "hpf/mixed_policy_grpo_bridge_window_size": float(max(int(bridge_window_size), 0)),
-        "hpf/mixed_policy_grpo_bridge_tokens_mean": float(bridge_mask.sum(dim=-1).float().mean().item()),
         "hpf/mixed_policy_grpo_horizon_tokens": float(horizon),
         "hpf/mixed_policy_grpo_prefix_tokens_mean": float(prefix_mask.sum(dim=-1).float().mean().item()),
         "hpf/mixed_policy_grpo_suffix_tokens_mean": float(
@@ -211,8 +203,45 @@ def build_hpf_mixed_policy_grpo_batch(
         metrics=metrics,
         prefix_mask=prefix_mask,
         suffix_mask=suffix_update_mask,
-        bridge_mask=bridge_mask,
     )
+
+
+def compute_hpf_clipped_grpo_surrogate(
+    *,
+    log_probs: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    advantages: torch.Tensor,
+    mask: torch.Tensor,
+    clip_ratio_low: float,
+    clip_ratio_high: float,
+    clip_ratio_c: float,
+    loss_agg_mode: str,
+    loss_scale_factor: float | None = None,
+) -> torch.Tensor:
+    """Return the positive clipped GRPO surrogate for transition estimation."""
+    mask = mask.bool()
+    log_ratio = (log_probs - old_log_probs).clamp(min=-20.0, max=20.0)
+    ratio = torch.exp(log_ratio)
+    objective = advantages * ratio
+    clipped_objective = advantages * torch.clamp(ratio, 1.0 - clip_ratio_low, 1.0 + clip_ratio_high)
+    objective = torch.minimum(objective, clipped_objective)
+    objective = torch.where(advantages < 0, torch.maximum(objective, advantages * clip_ratio_c), objective)
+
+    if loss_agg_mode == "token-mean":
+        return (objective * mask).sum() / mask.sum().clamp_min(1)
+
+    sequence_mask = mask.sum(dim=-1)
+    valid_sequences = sequence_mask > 0
+    if loss_agg_mode == "seq-mean-token-mean":
+        sequence_objective = (objective * mask).sum(dim=-1) / sequence_mask.clamp_min(1)
+    elif loss_agg_mode in ("seq-mean-token-sum", "seq-mean-token-sum-norm"):
+        sequence_objective = (objective * mask).sum(dim=-1)
+        if loss_agg_mode == "seq-mean-token-sum-norm":
+            normalizer = float(loss_scale_factor) if loss_scale_factor is not None else float(mask.shape[-1])
+            sequence_objective = sequence_objective / normalizer
+    else:
+        raise ValueError(f"Unsupported transition-aware loss aggregation mode: {loss_agg_mode}")
+    return sequence_objective[valid_sequences].mean() if valid_sequences.any() else objective.new_zeros(())
 
 
 def _masked_sequence_correction(

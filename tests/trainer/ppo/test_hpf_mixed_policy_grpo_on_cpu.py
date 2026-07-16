@@ -10,8 +10,10 @@ import pytest
 import torch
 
 from verl import DataProto
-from verl.trainer.ppo.hpf_utils import build_hpf_mixed_policy_grpo_batch
-from verl.utils.torch_functional import temperature_policy_kl_from_logits
+from verl.trainer.ppo.hpf_utils import (
+    build_hpf_mixed_policy_grpo_batch,
+    compute_hpf_clipped_grpo_surrogate,
+)
 
 
 def test_mixed_policy_grpo_uses_prefix_and_one_horizon_suffix_window():
@@ -114,46 +116,41 @@ def test_mixed_policy_grpo_can_train_the_full_suffix_tail():
     assert mixed.metrics["hpf/mixed_policy_grpo_full_suffix_tail"] == 1.0
 
 
-def test_mixed_policy_bridge_window_is_independent_of_pg_suffix_window():
-    response_mask = torch.ones(1, 8, dtype=torch.long)
-    advantages = torch.ones(1, 8)
-    batch = DataProto.from_single_dict(
-        {
-            "response_mask": response_mask,
-            "advantages": advantages,
-            "returns": advantages.clone(),
-        }
-    )
-    log_probs = torch.zeros(1, 8)
+def test_transition_surrogate_is_centered_at_behavior_policy():
+    old_log_probs = torch.tensor([[-1.0, -2.0], [-0.5, -1.5]])
+    advantages = torch.tensor([[1.0, 1.0], [-1.0, -1.0]])
+    mask = torch.ones_like(advantages, dtype=torch.bool)
 
-    mixed = build_hpf_mixed_policy_grpo_batch(
-        batch=batch,
-        round_index=1,
-        progressive_block_size=2,
-        max_response_length=8,
-        leader_old_log_probs=log_probs,
-        follower_old_log_probs=log_probs,
-        bridge_window_size=4,
+    value = compute_hpf_clipped_grpo_surrogate(
+        log_probs=old_log_probs,
+        old_log_probs=old_log_probs,
+        advantages=advantages,
+        mask=mask,
+        clip_ratio_low=0.2,
+        clip_ratio_high=0.2,
+        clip_ratio_c=3.0,
+        loss_agg_mode="token-mean",
     )
 
-    expected_pg = torch.tensor([[1, 1, 1, 1, 0, 0, 0, 0]], dtype=torch.bool)
-    expected_bridge = torch.tensor([[0, 0, 1, 1, 1, 1, 0, 0]], dtype=torch.bool)
-    assert torch.equal(mixed.batch.batch["hpf_pg_mask"].bool(), expected_pg)
-    assert torch.equal(mixed.batch.batch["hpf_bridge_kl_mask"].bool(), expected_bridge)
-    assert torch.equal(mixed.bridge_mask.bool(), expected_bridge)
+    assert value.item() == pytest.approx(0.0)
 
 
-def test_temperature_policy_kl_matches_direct_distribution_computation():
-    logits = torch.tensor([[1.0, -0.5, 0.25], [0.2, 0.4, -0.3]], requires_grad=True)
-    low_temperature = 0.25
-    high_temperature = 1.0
+def test_transition_surrogate_applies_ppo_clipping():
+    old_log_probs = torch.zeros(1, 2)
+    log_probs = torch.log(torch.tensor([[2.0, 0.5]]))
+    advantages = torch.tensor([[1.0, -1.0]])
+    mask = torch.ones_like(advantages, dtype=torch.bool)
 
-    actual = temperature_policy_kl_from_logits(logits, low_temperature, high_temperature)
-    low_log_probs = torch.log_softmax(logits / low_temperature, dim=-1)
-    high_log_probs = torch.log_softmax(logits / high_temperature, dim=-1)
-    expected = torch.sum(low_log_probs.exp() * (low_log_probs - high_log_probs), dim=-1)
+    value = compute_hpf_clipped_grpo_surrogate(
+        log_probs=log_probs,
+        old_log_probs=old_log_probs,
+        advantages=advantages,
+        mask=mask,
+        clip_ratio_low=0.2,
+        clip_ratio_high=0.2,
+        clip_ratio_c=3.0,
+        loss_agg_mode="token-mean",
+    )
 
-    assert torch.allclose(actual, expected, atol=1e-6)
-    actual.sum().backward()
-    assert logits.grad is not None
-    assert torch.isfinite(logits.grad).all()
+    # Positive advantage is capped at 1.2; negative advantage uses the worse clipped value -0.8.
+    assert value.item() == pytest.approx((1.2 - 0.8) / 2)

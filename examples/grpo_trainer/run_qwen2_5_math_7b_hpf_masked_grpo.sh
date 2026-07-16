@@ -25,9 +25,8 @@ HPF_LOCAL_UPDATE_WINDOW_SIZE=${HPF_LOCAL_UPDATE_WINDOW_SIZE:-null}
 HPF_ROLE_PHASED_TRAINING=${HPF_ROLE_PHASED_TRAINING:-False}
 HPF_MIXED_POLICY_GRPO=${HPF_MIXED_POLICY_GRPO:-False}
 HPF_MIXED_POLICY_FULL_SUFFIX_TAIL=${HPF_MIXED_POLICY_FULL_SUFFIX_TAIL:-False}
-HPF_MIXED_POLICY_BRIDGE_KL_COEF=${HPF_MIXED_POLICY_BRIDGE_KL_COEF:-0.0}
-HPF_MIXED_POLICY_BRIDGE_WINDOW_SIZE=${HPF_MIXED_POLICY_BRIDGE_WINDOW_SIZE:-64}
-HPF_MIXED_POLICY_BRIDGE_KL_CHUNK_SIZE=${HPF_MIXED_POLICY_BRIDGE_KL_CHUNK_SIZE:-32}
+HPF_MIXED_POLICY_TRANSITION_AWARE=${HPF_MIXED_POLICY_TRANSITION_AWARE:-False}
+HPF_MIXED_POLICY_TRANSITION_COEF=${HPF_MIXED_POLICY_TRANSITION_COEF:-1.0}
 HPF_FOLLOWER_PHASE_EPOCHS=${HPF_FOLLOWER_PHASE_EPOCHS:-1}
 HPF_LEADER_PHASE_EPOCHS=${HPF_LEADER_PHASE_EPOCHS:-1}
 HPF_PROGRESS_LOG_INTERVAL=${HPF_PROGRESS_LOG_INTERVAL:-1}
@@ -100,6 +99,16 @@ if [ "${HPF_MIXED_POLICY_GRPO}" = "True" ] || [ "${HPF_MIXED_POLICY_GRPO}" = "tr
     fi
 fi
 
+if [ "${HPF_MIXED_POLICY_TRANSITION_AWARE}" = "True" ] \
+    || [ "${HPF_MIXED_POLICY_TRANSITION_AWARE}" = "true" ] \
+    || [ "${HPF_MIXED_POLICY_TRANSITION_AWARE}" = "1" ]; then
+    if [ "${HPF_MIXED_POLICY_GRPO}" != "True" ] && [ "${HPF_MIXED_POLICY_GRPO}" != "true" ] \
+        && [ "${HPF_MIXED_POLICY_GRPO}" != "1" ]; then
+        echo "HPF transition-aware GRPO requires HPF_MIXED_POLICY_GRPO=True." >&2
+        exit 1
+    fi
+fi
+
 # A suffix KL to theta_F is exactly zero on the first leader optimizer step.
 # Keep at least two mini-batches per HPF phase by default so the second and
 # later steps evaluate the combined PG+KL loss after the policy has moved.
@@ -146,9 +155,8 @@ HPF_ARGS=(
     algorithm.hpf_rlvr.role_phased_training.leader_epochs="${HPF_LEADER_PHASE_EPOCHS}"
     algorithm.hpf_rlvr.mixed_policy_grpo.enable="${HPF_MIXED_POLICY_GRPO}"
     algorithm.hpf_rlvr.mixed_policy_grpo.full_suffix_tail="${HPF_MIXED_POLICY_FULL_SUFFIX_TAIL}"
-    algorithm.hpf_rlvr.mixed_policy_grpo.bridge_kl_coef="${HPF_MIXED_POLICY_BRIDGE_KL_COEF}"
-    algorithm.hpf_rlvr.mixed_policy_grpo.bridge_window_size="${HPF_MIXED_POLICY_BRIDGE_WINDOW_SIZE}"
-    algorithm.hpf_rlvr.mixed_policy_grpo.bridge_kl_chunk_size="${HPF_MIXED_POLICY_BRIDGE_KL_CHUNK_SIZE}"
+    algorithm.hpf_rlvr.mixed_policy_grpo.transition_aware.enable="${HPF_MIXED_POLICY_TRANSITION_AWARE}"
+    algorithm.hpf_rlvr.mixed_policy_grpo.transition_aware.coefficient="${HPF_MIXED_POLICY_TRANSITION_COEF}"
     algorithm.hpf_rlvr.progress_log_interval="${HPF_PROGRESS_LOG_INTERVAL}"
     actor_rollout_ref.actor.loss_agg_mode="${HPF_LOSS_AGG_MODE}"
 )

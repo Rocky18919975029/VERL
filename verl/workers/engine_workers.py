@@ -251,6 +251,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
         dataloader_kwargs = tu.pop(data, key="dataloader_kwargs", default={})
         progress_label = tu.pop(data, key="progress_label", default=None)
         progress_log_interval = int(tu.pop(data, key="progress_log_interval", default=0) or 0)
+        step_lr_scheduler = bool(tu.pop(data, key="step_lr_scheduler", default=True))
 
         assert mini_batch_size is not None or num_mini_batch is not None
 
@@ -317,7 +318,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
                 tu.assign_non_tensor(
                     mini_batch_td,
                     global_token_num=NonTensorData(global_token_num),
-                    update_lr_scheduler=batch_idx == total_num_iterations - 1,
+                    update_lr_scheduler=step_lr_scheduler and batch_idx == total_num_iterations - 1,
                     disable_auto_offload=True,
                 )
                 if progress_enabled:
