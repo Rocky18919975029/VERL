@@ -490,11 +490,6 @@ class RayPPOTrainer:
                         "HPF mixed-policy GRPO suffix_window_size must be positive or null, "
                         f"got {suffix_window_size}."
                     )
-                if transition_aware_rollout:
-                    raise ValueError(
-                        "HPF transition-aware objective requires mixed_policy_grpo.suffix_window_size=null "
-                        "so its current-cut GRPO term covers the complete trajectory."
-                    )
             if transition_aware_rollout and int(tree_config.get("num_suffixes", 1)) != 1:
                 raise ValueError(
                     "HPF transition-aware rollout requires tree_rollout.num_suffixes=1; "
@@ -1785,6 +1780,21 @@ class RayPPOTrainer:
         if hpf_round_index is None:
             hpf_round_index = self._get_hpf_round_index(None)
         prefix_horizon = min(int(hpf_round_index) * progressive_block_size, max_response_length)
+        transition_aware_rollout = self._parse_hpf_bool(
+            mixed_policy_config.get("transition_aware_rollout", {}).get("enable", False), False
+        )
+        next_horizon = min(prefix_horizon + progressive_block_size, max_response_length)
+        transition_width = next_horizon - prefix_horizon
+        if (
+            transition_aware_rollout
+            and suffix_window_size is not None
+            and suffix_window_size < transition_width
+        ):
+            raise ValueError(
+                "HPF transition-aware suffix_window_size must cover the next-cut transition: "
+                f"suffix_window_size={suffix_window_size}, "
+                f"next_horizon-current_horizon={transition_width}."
+            )
         if (
             "hpf_leader_rollout_old_log_probs" not in batch.batch
             or "hpf_follower_rollout_old_log_probs" not in batch.batch
@@ -2590,6 +2600,20 @@ class RayPPOTrainer:
             hpf_round_index = self._get_hpf_round_index(None)
         current_horizon = min(int(hpf_round_index) * progressive_block_size, max_response_length)
         next_horizon = min(current_horizon + progressive_block_size, max_response_length)
+        mixed_policy_config = hpf_config.get("mixed_policy_grpo", {})
+        suffix_window_size_value = mixed_policy_config.get("suffix_window_size", None)
+        suffix_window_size = (
+            None
+            if suffix_window_size_value is None or str(suffix_window_size_value).lower() == "null"
+            else int(suffix_window_size_value)
+        )
+        transition_width = next_horizon - current_horizon
+        if suffix_window_size is not None and suffix_window_size < transition_width:
+            raise ValueError(
+                "HPF transition-aware suffix_window_size must cover the next-cut transition before rollout: "
+                f"suffix_window_size={suffix_window_size}, "
+                f"next_horizon-current_horizon={transition_width}."
+            )
         prefix_temperature = float(tree_config.get("prefix_temperature", 1.0))
         prefix_top_p = float(tree_config.get("prefix_top_p", 1.0))
         suffix_temperature = float(tree_config.get("suffix_temperature", 0.25))
