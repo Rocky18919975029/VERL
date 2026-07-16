@@ -77,9 +77,9 @@ def paired_steps(run_dir: Path) -> list[int]:
     return sorted(set(current) & set(next_cut))
 
 
-def discover_latest_run(project_dir: Path) -> Path:
+def discover_latest_run(project_dir: Path) -> Path | None:
     if not project_dir.is_dir():
-        raise FileNotFoundError(f"Project rollout directory does not exist: {project_dir}")
+        return None
     candidates = []
     for run_dir in project_dir.iterdir():
         if not run_dir.is_dir():
@@ -88,7 +88,7 @@ def discover_latest_run(project_dir: Path) -> Path:
         if steps:
             candidates.append((len(steps), max(steps), run_dir.stat().st_mtime, run_dir))
     if not candidates:
-        raise FileNotFoundError(f"No run with paired transition rollouts found under {project_dir}")
+        return None
     return max(candidates)[-1]
 
 
@@ -264,11 +264,22 @@ def make_plot(metrics: pd.DataFrame, specs: list[RunSpec], output_dir: Path) -> 
 
 def main() -> None:
     args = parse_args()
-    lambda05_dir = args.lambda05_run_dir or discover_latest_run(args.lambda05_project_dir)
     specs = [
         RunSpec("lambda=1.0", 1.0, args.lambda1_run_dir, "#2563a6", "o"),
-        RunSpec("lambda=0.5", 0.5, lambda05_dir, "#b51f2e", "s"),
     ]
+    if args.lambda05_run_dir is not None:
+        if not args.lambda05_run_dir.is_dir():
+            raise FileNotFoundError(f"Requested lambda=0.5 run does not exist: {args.lambda05_run_dir}")
+        lambda05_dir = args.lambda05_run_dir
+    else:
+        lambda05_dir = discover_latest_run(args.lambda05_project_dir)
+    if lambda05_dir is None:
+        print(
+            "WARNING: lambda=0.5 has no complete paired rollout step yet; "
+            "plotting lambda=1.0 only. Rerun this command after its first step is dumped."
+        )
+    else:
+        specs.append(RunSpec("lambda=0.5", 0.5, lambda05_dir, "#b51f2e", "s"))
 
     frames = []
     for spec in specs:
