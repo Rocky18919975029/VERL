@@ -49,6 +49,7 @@ from verl.trainer.ppo.hpf_utils import (
     build_hpf_masked_batches,
     build_hpf_mixed_policy_grpo_batch,
     build_hpf_transition_prefix_plan,
+    estimate_hpf_transition_return,
 )
 from verl.trainer.ppo.hpf_schedule import get_hpf_role_phase
 from verl.trainer.ppo.metric_utils import (
@@ -3155,11 +3156,25 @@ class RayPPOTrainer:
                                 transition_next_reward_extra_infos_dict,
                             ) = extract_reward(transition_next_batch)
                             transition_next_batch.batch["token_level_scores"] = transition_next_reward_tensor
-                            metrics["hpf/transition_current_reward_mean"] = float(
-                                reward_tensor.sum(dim=-1).float().mean().item()
+                            transition_return = estimate_hpf_transition_return(
+                                batch,
+                                transition_next_batch,
+                                current_reward_tensor=reward_tensor,
+                                next_reward_tensor=transition_next_reward_tensor,
                             )
-                            metrics["hpf/transition_next_reward_mean"] = float(
-                                transition_next_reward_tensor.sum(dim=-1).float().mean().item()
+                            metrics.update(transition_return.metrics())
+                            batch.meta_info["hpf_transition_return_estimate"] = transition_return.delta_mean
+                            transition_next_batch.meta_info[
+                                "hpf_transition_return_estimate"
+                            ] = transition_return.delta_mean
+                            print(
+                                "[HPF] transition return estimated "
+                                f"step={self.global_steps} pairs={transition_return.num_pairs} "
+                                f"current={transition_return.current_mean:.6f} "
+                                f"next={transition_return.next_mean:.6f} "
+                                f"delta={transition_return.delta_mean:.6f} "
+                                f"delta_std={transition_return.delta_std:.6f}",
+                                flush=True,
                             )
 
                     # Operating Mode Selection:

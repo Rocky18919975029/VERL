@@ -32,6 +32,88 @@ class HPFTransitionPrefixPlan:
     request_cut_indices: np.ndarray
 
 
+@dataclass(frozen=True)
+class HPFTransitionReturnEstimate:
+    current_mean: float
+    next_mean: float
+    delta_mean: float
+    delta_std: float
+    delta_positive_frac: float
+    num_pairs: int
+
+    def metrics(self) -> dict[str, float]:
+        return {
+            "hpf/transition_current_reward_mean": self.current_mean,
+            "hpf/transition_next_reward_mean": self.next_mean,
+            "hpf/transition_current_return_mean": self.current_mean,
+            "hpf/transition_next_return_mean": self.next_mean,
+            "hpf/transition_return_delta_mean": self.delta_mean,
+            "hpf/transition_return_delta_std": self.delta_std,
+            "hpf/transition_return_delta_positive_frac": self.delta_positive_frac,
+            "hpf/transition_return_num_pairs": float(self.num_pairs),
+        }
+
+
+def estimate_hpf_transition_return(
+    current_batch: DataProto,
+    next_batch: DataProto,
+    *,
+    current_reward_tensor: torch.Tensor,
+    next_reward_tensor: torch.Tensor,
+) -> HPFTransitionReturnEstimate:
+    """Estimate ``J_{h_{i+1}} - J_{h_i}`` from paired behavior rollouts."""
+    pair_key = "hpf_transition_pair_uid"
+    if pair_key not in current_batch.non_tensor_batch or pair_key not in next_batch.non_tensor_batch:
+        raise ValueError(f"Transition return estimation requires {pair_key!r} in both cut batches.")
+
+    current_pair_ids = [str(value) for value in current_batch.non_tensor_batch[pair_key]]
+    next_pair_ids = [str(value) for value in next_batch.non_tensor_batch[pair_key]]
+    if len(current_pair_ids) != current_reward_tensor.shape[0]:
+        raise ValueError(
+            "Current transition pair IDs and rewards have different row counts: "
+            f"{len(current_pair_ids)} != {current_reward_tensor.shape[0]}."
+        )
+    if len(next_pair_ids) != next_reward_tensor.shape[0]:
+        raise ValueError(
+            "Next transition pair IDs and rewards have different row counts: "
+            f"{len(next_pair_ids)} != {next_reward_tensor.shape[0]}."
+        )
+    if len(set(current_pair_ids)) != len(current_pair_ids):
+        raise ValueError("Current-cut transition pair IDs must be unique.")
+    if len(set(next_pair_ids)) != len(next_pair_ids):
+        raise ValueError("Next-cut transition pair IDs must be unique.")
+    current_pair_set = set(current_pair_ids)
+    next_pair_set = set(next_pair_ids)
+    if current_pair_set != next_pair_set:
+        missing_next = sorted(current_pair_set - next_pair_set)[:3]
+        missing_current = sorted(next_pair_set - current_pair_set)[:3]
+        raise ValueError(
+            "Current- and next-cut transition pair IDs do not match: "
+            f"missing_from_next={missing_next}, missing_from_current={missing_current}."
+        )
+    if not current_pair_ids:
+        raise ValueError("Transition return estimation requires at least one rollout pair.")
+
+    current_returns = current_reward_tensor.sum(dim=-1).detach().float().cpu()
+    next_returns = next_reward_tensor.sum(dim=-1).detach().float().cpu()
+    next_index_by_pair = {pair_id: index for index, pair_id in enumerate(next_pair_ids)}
+    next_order = torch.tensor(
+        [next_index_by_pair[pair_id] for pair_id in current_pair_ids],
+        dtype=torch.long,
+    )
+    aligned_next_returns = next_returns.index_select(0, next_order)
+    return_delta = aligned_next_returns - current_returns
+
+    return HPFTransitionReturnEstimate(
+        current_mean=float(current_returns.mean().item()),
+        next_mean=float(aligned_next_returns.mean().item()),
+        delta_mean=float(return_delta.mean().item()),
+        delta_std=float(return_delta.std(unbiased=False).item()),
+        delta_positive_frac=float((return_delta > 0).float().mean().item()),
+        num_pairs=len(current_pair_ids),
+    )
+
+
 def build_hpf_transition_prefix_plan(
     high_token_ids: list[list[int]],
     *,
