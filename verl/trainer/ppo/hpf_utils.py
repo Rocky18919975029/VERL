@@ -20,6 +20,71 @@ class HPFMaskedBatch:
     suffix_mask: torch.Tensor | None = None
 
 
+@dataclass
+class HPFTransitionPrefixPlan:
+    current_prefix_ids: list[list[int]]
+    next_prefix_ids: list[list[int]]
+    current_prefix_lengths: np.ndarray
+    next_prefix_lengths: np.ndarray
+    current_needs_suffix: np.ndarray
+    next_needs_suffix: np.ndarray
+    request_source_rows: np.ndarray
+    request_cut_indices: np.ndarray
+
+
+def build_hpf_transition_prefix_plan(
+    high_token_ids: list[list[int]],
+    *,
+    current_horizon: int,
+    next_horizon: int,
+    max_response_length: int,
+) -> HPFTransitionPrefixPlan:
+    """Derive paired cut prefixes and a source-major low-temperature request plan."""
+    if current_horizon < 0:
+        raise ValueError(f"current_horizon must be non-negative, got {current_horizon}.")
+    if next_horizon < current_horizon:
+        raise ValueError(
+            f"next_horizon must be at least current_horizon, got {next_horizon} < {current_horizon}."
+        )
+    if next_horizon > max_response_length:
+        raise ValueError(
+            f"next_horizon must not exceed max_response_length, got {next_horizon} > {max_response_length}."
+        )
+
+    high_lengths = np.asarray([len(token_ids) for token_ids in high_token_ids], dtype=np.int32)
+    current_prefix_ids = [token_ids[:current_horizon] for token_ids in high_token_ids]
+    next_prefix_ids = [token_ids[:next_horizon] for token_ids in high_token_ids]
+    current_prefix_lengths = np.asarray([len(token_ids) for token_ids in current_prefix_ids], dtype=np.int32)
+    next_prefix_lengths = np.asarray([len(token_ids) for token_ids in next_prefix_ids], dtype=np.int32)
+    # The high-temperature request runs past the current cut. If it stops at
+    # exactly the current horizon, that prefix already contains its terminal
+    # token and must not be continued by the low-temperature policy.
+    current_needs_suffix = (high_lengths > current_horizon) & (current_horizon < max_response_length)
+    next_needs_suffix = (high_lengths >= next_horizon) & (next_horizon < max_response_length)
+
+    current_rows = np.nonzero(current_needs_suffix)[0]
+    next_rows = np.nonzero(next_needs_suffix)[0]
+    source_rows = np.concatenate([current_rows, next_rows])
+    cut_indices = np.concatenate(
+        [np.zeros(len(current_rows), dtype=np.int32), np.ones(len(next_rows), dtype=np.int32)]
+    )
+    if len(source_rows):
+        request_order = np.lexsort((cut_indices, source_rows))
+        source_rows = source_rows[request_order]
+        cut_indices = cut_indices[request_order]
+
+    return HPFTransitionPrefixPlan(
+        current_prefix_ids=current_prefix_ids,
+        next_prefix_ids=next_prefix_ids,
+        current_prefix_lengths=current_prefix_lengths,
+        next_prefix_lengths=next_prefix_lengths,
+        current_needs_suffix=current_needs_suffix,
+        next_needs_suffix=next_needs_suffix,
+        request_source_rows=source_rows,
+        request_cut_indices=cut_indices,
+    )
+
+
 def _normalize_group_scores(
     scores: torch.Tensor, group_ids: np.ndarray, epsilon: float, std_normalize: bool
 ) -> torch.Tensor:

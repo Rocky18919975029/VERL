@@ -25,6 +25,7 @@ HPF_LOCAL_UPDATE_WINDOW_SIZE=${HPF_LOCAL_UPDATE_WINDOW_SIZE:-null}
 HPF_ROLE_PHASED_TRAINING=${HPF_ROLE_PHASED_TRAINING:-False}
 HPF_MIXED_POLICY_GRPO=${HPF_MIXED_POLICY_GRPO:-False}
 HPF_MIXED_POLICY_SUFFIX_WINDOW_SIZE=${HPF_MIXED_POLICY_SUFFIX_WINDOW_SIZE:-null}
+HPF_MIXED_POLICY_TRANSITION_AWARE_ROLLOUT=${HPF_MIXED_POLICY_TRANSITION_AWARE_ROLLOUT:-False}
 HPF_FOLLOWER_PHASE_EPOCHS=${HPF_FOLLOWER_PHASE_EPOCHS:-1}
 HPF_LEADER_PHASE_EPOCHS=${HPF_LEADER_PHASE_EPOCHS:-1}
 HPF_PROGRESS_LOG_INTERVAL=${HPF_PROGRESS_LOG_INTERVAL:-1}
@@ -143,6 +144,7 @@ HPF_ARGS=(
     algorithm.hpf_rlvr.role_phased_training.leader_epochs="${HPF_LEADER_PHASE_EPOCHS}"
     algorithm.hpf_rlvr.mixed_policy_grpo.enable="${HPF_MIXED_POLICY_GRPO}"
     algorithm.hpf_rlvr.mixed_policy_grpo.suffix_window_size="${HPF_MIXED_POLICY_SUFFIX_WINDOW_SIZE}"
+    algorithm.hpf_rlvr.mixed_policy_grpo.transition_aware_rollout.enable="${HPF_MIXED_POLICY_TRANSITION_AWARE_ROLLOUT}"
     algorithm.hpf_rlvr.progress_log_interval="${HPF_PROGRESS_LOG_INTERVAL}"
     actor_rollout_ref.actor.loss_agg_mode="${HPF_LOSS_AGG_MODE}"
 )

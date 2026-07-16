@@ -48,6 +48,7 @@ from verl.trainer.ppo.hpf_utils import (
     build_hpf_fresh_leader_batch,
     build_hpf_masked_batches,
     build_hpf_mixed_policy_grpo_batch,
+    build_hpf_transition_prefix_plan,
 )
 from verl.trainer.ppo.hpf_schedule import get_hpf_role_phase
 from verl.trainer.ppo.metric_utils import (
@@ -447,6 +448,10 @@ class RayPPOTrainer:
         role_phased_training = self._parse_hpf_bool(role_phased_config.get("enable", False), False)
         mixed_policy_config = hpf_config.get("mixed_policy_grpo", {})
         mixed_policy_grpo = self._parse_hpf_bool(mixed_policy_config.get("enable", False), False)
+        transition_rollout_config = mixed_policy_config.get("transition_aware_rollout", {})
+        transition_aware_rollout = self._parse_hpf_bool(
+            transition_rollout_config.get("enable", False), False
+        )
         if mixed_policy_grpo:
             tree_config = hpf_config.get("tree_rollout", {})
             if not self._parse_hpf_bool(hpf_config.get("enable", False), False) or not self._parse_hpf_bool(
@@ -485,6 +490,17 @@ class RayPPOTrainer:
                         "HPF mixed-policy GRPO suffix_window_size must be positive or null, "
                         f"got {suffix_window_size}."
                     )
+            if transition_aware_rollout and int(tree_config.get("num_suffixes", 1)) != 1:
+                raise ValueError(
+                    "HPF transition-aware rollout requires tree_rollout.num_suffixes=1; "
+                    "it produces one paired low-temperature completion per sampled prefix."
+                )
+            if transition_aware_rollout and not self.config.trainer.get("rollout_data_dir", None):
+                raise ValueError(
+                    "HPF transition-aware rollout requires trainer.rollout_data_dir so both cut batches are saved."
+                )
+        elif transition_aware_rollout:
+            raise ValueError("HPF transition-aware rollout requires mixed_policy_grpo.enable=True.")
         if role_phased_training:
             follower_epochs = int(role_phased_config.get("follower_epochs", 1))
             leader_epochs = int(role_phased_config.get("leader_epochs", 1))
@@ -640,6 +656,15 @@ class RayPPOTrainer:
                     "request_id",
                     batch.non_tensor_batch["request_id"].tolist(),
                 )
+            for key in (
+                "hpf_transition_pair_uid",
+                "hpf_transition_cut",
+                "hpf_transition_prefix_horizon",
+                "hpf_prefix_ids",
+                "hpf_transition_suffix_ids",
+            ):
+                if key in batch.non_tensor_batch:
+                    reward_extra_infos_to_dump.setdefault(key, batch.non_tensor_batch[key].tolist())
 
             self._dump_generations(
                 inputs=inputs,
@@ -2491,6 +2516,291 @@ class RayPPOTrainer:
         tree_output.meta_info["timing"] = tree_timing
         return tree_output, tree_metrics
 
+    def _generate_hpf_transition_aware_sequences(
+        self,
+        gen_batch: DataProto,
+        *,
+        hpf_round_index: int | None = None,
+    ) -> tuple[DataProto, DataProto, dict[str, float]]:
+        """Sample paired mixed-policy trajectories at the current and next cuts.
+
+        A single high-temperature rollout produces each next-cut prefix. The
+        current-cut prefix is its truncation. All current- and next-cut
+        prefixes that require continuation are then submitted together in one
+        low-temperature rollout batch. No replica affinity is assumed.
+        """
+        rollout_start = time.perf_counter()
+        if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
+            raise ValueError("HPF transition-aware rollout does not support REMAX baseline generation.")
+        if self.config.actor_rollout_ref.actor.get("use_rollout_log_probs", False):
+            raise ValueError(
+                "HPF transition-aware rollout records its own mixed-policy log probabilities; "
+                "disable actor.use_rollout_log_probs."
+            )
+
+        hpf_config = self.config.algorithm.get("hpf_rlvr", {})
+        tree_config = hpf_config.get("tree_rollout", {})
+        num_prefixes = int(tree_config.get("num_prefixes", 4))
+        num_suffixes = int(tree_config.get("num_suffixes", 1))
+        if num_prefixes <= 0:
+            raise ValueError(f"HPF transition-aware rollout num_prefixes must be positive, got {num_prefixes}.")
+        if num_suffixes != 1:
+            raise ValueError(
+                "HPF transition-aware rollout requires tree_rollout.num_suffixes=1, "
+                f"got {num_suffixes}."
+            )
+        rollout_n = int(self.config.actor_rollout_ref.rollout.n)
+        if rollout_n != num_prefixes:
+            raise ValueError(
+                "HPF transition-aware rollout requires actor_rollout_ref.rollout.n to equal "
+                f"tree_rollout.num_prefixes ({num_prefixes}), got {rollout_n}."
+            )
+
+        max_response_length = int(hpf_config.get("max_response_length", self.config.data.max_response_length))
+        progressive_block_size = int(hpf_config.get("progressive_block_size", 256))
+        if hpf_round_index is None:
+            hpf_round_index = self._get_hpf_round_index(None)
+        current_horizon = min(int(hpf_round_index) * progressive_block_size, max_response_length)
+        next_horizon = min(current_horizon + progressive_block_size, max_response_length)
+        prefix_temperature = float(tree_config.get("prefix_temperature", 1.0))
+        prefix_top_p = float(tree_config.get("prefix_top_p", 1.0))
+        suffix_temperature = float(tree_config.get("suffix_temperature", 0.25))
+        suffix_top_p = float(tree_config.get("suffix_top_p", 1.0))
+        print(
+            "[HPF] transition-aware rollout start "
+            f"step={self.global_steps} round={hpf_round_index} prompts={len(gen_batch)} "
+            f"prefixes={num_prefixes} current_horizon={current_horizon} "
+            f"next_horizon={next_horizon} max_response={max_response_length}",
+            flush=True,
+        )
+
+        rollout_worker_divisor = int(self.config.actor_rollout_ref.rollout.agent.num_workers)
+        high_batch = gen_batch.repeat(repeat_times=num_prefixes, interleave=True)
+        high_batch.meta_info["temperature"] = prefix_temperature
+        high_batch.meta_info["top_p"] = prefix_top_p
+        high_batch.meta_info["max_tokens"] = next_horizon
+        high_batch.meta_info["logprobs"] = True
+        high_batch_padded, high_pad_size = pad_dataproto_to_divisor(high_batch, rollout_worker_divisor)
+        high_start = time.perf_counter()
+        print(
+            "[HPF] transition-aware high-temperature prefix rollout start "
+            f"step={self.global_steps} requests={len(high_batch)} pad={high_pad_size} "
+            f"max_tokens={next_horizon}",
+            flush=True,
+        )
+        high_output = self.async_rollout_manager.generate_sequences(high_batch_padded)
+        high_output = unpad_dataproto(high_output, high_pad_size)
+        if len(high_output) != len(high_batch):
+            raise ValueError(
+                "HPF transition-aware high-temperature rollout returned an unexpected number of rows: "
+                f"expected {len(high_batch)}, got {len(high_output)}."
+            )
+        high_elapsed = time.perf_counter() - high_start
+        print(
+            "[HPF] transition-aware high-temperature prefix rollout done "
+            f"step={self.global_steps} outputs={len(high_output)} elapsed_s={high_elapsed:.2f}",
+            flush=True,
+        )
+        high_timing = high_output.meta_info.get("timing", {})
+        high_output.meta_info.pop("timing", None)
+        high_rollout_log_probs = high_output.batch.get("rollout_log_probs", None)
+        if high_rollout_log_probs is None:
+            raise ValueError("HPF transition-aware high-temperature rollout did not return rollout_log_probs.")
+        self._drop_hpf_tree_unused_batch_keys(high_output)
+
+        high_token_ids = self._extract_response_token_ids(high_output)
+        prefix_plan = build_hpf_transition_prefix_plan(
+            high_token_ids,
+            current_horizon=current_horizon,
+            next_horizon=next_horizon,
+            max_response_length=max_response_length,
+        )
+        current_source_rows = np.nonzero(prefix_plan.current_needs_suffix)[0]
+        next_source_rows = np.nonzero(prefix_plan.next_needs_suffix)[0]
+        request_source_rows = prefix_plan.request_source_rows
+        request_cut_indices = prefix_plan.request_cut_indices
+        request_prefix_ids = [
+            (
+                prefix_plan.current_prefix_ids[source_row]
+                if cut_index == 0
+                else prefix_plan.next_prefix_ids[source_row]
+            )
+            for source_row, cut_index in zip(request_source_rows, request_cut_indices, strict=True)
+        ]
+        low_output = None
+        low_rollout_log_probs = None
+        low_timing = {}
+        low_elapsed = 0.0
+        low_pad_size = 0
+        low_row_by_cut_and_source: dict[tuple[int, int], int] = {}
+        if len(request_source_rows):
+            low_source = high_batch.select_idxs(request_source_rows)
+            request_prefix_lengths = np.asarray([len(token_ids) for token_ids in request_prefix_ids], dtype=np.int32)
+            low_source.non_tensor_batch["hpf_prefix_ids"] = self._object_array(request_prefix_ids)
+            low_budgets = np.maximum(max_response_length - request_prefix_lengths, 1)
+            low_source.non_tensor_batch["__max_tokens__"] = low_budgets.astype(np.int32)
+            low_source.meta_info["temperature"] = suffix_temperature
+            low_source.meta_info["top_p"] = suffix_top_p
+            low_source.meta_info["logprobs"] = True
+            low_source_padded, low_pad_size = pad_dataproto_to_divisor(low_source, rollout_worker_divisor)
+            low_start = time.perf_counter()
+            print(
+                "[HPF] transition-aware combined low-temperature suffix rollout start "
+                f"step={self.global_steps} current_requests={len(current_source_rows)} "
+                f"next_requests={len(next_source_rows)} requests={len(low_source)} pad={low_pad_size} "
+                f"budget_mean={float(low_budgets.mean()):.1f} budget_max={int(low_budgets.max())}",
+                flush=True,
+            )
+            low_output = self.async_rollout_manager.generate_sequences(low_source_padded)
+            low_output = unpad_dataproto(low_output, low_pad_size)
+            if len(low_output) != len(low_source):
+                raise ValueError(
+                    "HPF transition-aware low-temperature rollout returned an unexpected number of rows: "
+                    f"expected {len(low_source)}, got {len(low_output)}."
+                )
+            low_elapsed = time.perf_counter() - low_start
+            print(
+                "[HPF] transition-aware combined low-temperature suffix rollout done "
+                f"step={self.global_steps} outputs={len(low_output)} elapsed_s={low_elapsed:.2f}",
+                flush=True,
+            )
+            low_timing = low_output.meta_info.get("timing", {})
+            low_output.meta_info.pop("timing", None)
+            low_rollout_log_probs = low_output.batch.get("rollout_log_probs", None)
+            if low_rollout_log_probs is None:
+                raise ValueError("HPF transition-aware low-temperature rollout did not return rollout_log_probs.")
+            self._drop_hpf_tree_unused_batch_keys(low_output)
+            internal_sampling_keys = [
+                key
+                for key in (
+                    "hpf_prefix_ids",
+                    "__temperature__",
+                    "__top_p__",
+                    "__top_k__",
+                    "__max_tokens__",
+                    "__max_new_tokens__",
+                    "__logprobs__",
+                )
+                if key in low_output.non_tensor_batch
+            ]
+            if internal_sampling_keys:
+                low_output.pop(non_tensor_batch_keys=internal_sampling_keys)
+            low_row_by_cut_and_source = {
+                (int(cut_index), int(source_row)): low_row
+                for low_row, (cut_index, source_row) in enumerate(
+                    zip(request_cut_indices, request_source_rows, strict=True)
+                )
+            }
+        else:
+            print(
+                "[HPF] transition-aware combined low-temperature suffix rollout skipped "
+                f"step={self.global_steps} requests=0",
+                flush=True,
+            )
+
+        problem_uids = np.asarray(high_batch.non_tensor_batch["uid"], dtype=object)
+        prefix_indices = np.tile(np.arange(num_prefixes, dtype=np.int32), len(gen_batch))
+
+        def assemble_cut_output(
+            *,
+            cut_index: int,
+            prefix_ids: list[list[int]],
+            prefix_lengths: np.ndarray,
+        ) -> DataProto:
+            ordered_outputs = []
+            leader_old_log_probs = []
+            follower_old_log_probs = []
+            for source_row in range(len(high_output)):
+                low_row = low_row_by_cut_and_source.get((cut_index, source_row))
+                if low_row is None:
+                    ordered_outputs.append(high_output[source_row : source_row + 1])
+                    leader_log_probs = high_rollout_log_probs[source_row].clone()
+                    follower_log_probs = torch.zeros_like(leader_log_probs)
+                else:
+                    ordered_outputs.append(low_output[low_row : low_row + 1])
+                    follower_log_probs = low_rollout_log_probs[low_row].clone()
+                    leader_log_probs = torch.zeros_like(follower_log_probs)
+                    prefix_length = int(prefix_lengths[source_row])
+                    if prefix_length > 0:
+                        leader_log_probs[:prefix_length] = high_rollout_log_probs[source_row, :prefix_length]
+                leader_old_log_probs.append(leader_log_probs)
+                follower_old_log_probs.append(follower_log_probs)
+
+            output = DataProto.concat(ordered_outputs)
+            output.batch["hpf_leader_rollout_old_log_probs"] = torch.stack(leader_old_log_probs, dim=0)
+            output.batch["hpf_follower_rollout_old_log_probs"] = torch.stack(follower_old_log_probs, dim=0)
+            self._add_hpf_tree_metadata(
+                output,
+                problem_uids=problem_uids,
+                prefix_indices=prefix_indices,
+                suffix_indices=np.zeros(len(output), dtype=np.int32),
+                prefix_token_ids=prefix_ids,
+            )
+            pair_uids = [
+                f"{problem_uid}::prefix-{int(prefix_index)}"
+                for problem_uid, prefix_index in zip(problem_uids, prefix_indices, strict=True)
+            ]
+            output.non_tensor_batch["hpf_transition_pair_uid"] = np.asarray(pair_uids, dtype=object)
+            output.non_tensor_batch["hpf_transition_cut"] = np.asarray(
+                ["current" if cut_index == 0 else "next"] * len(output), dtype=object
+            )
+            horizon = current_horizon if cut_index == 0 else next_horizon
+            output.non_tensor_batch["hpf_transition_prefix_horizon"] = np.full(
+                len(output), horizon, dtype=np.int32
+            )
+            response_ids = self._extract_response_token_ids(output)
+            suffix_ids = [
+                token_ids[len(prefix_token_ids) :]
+                for token_ids, prefix_token_ids in zip(response_ids, prefix_ids, strict=True)
+            ]
+            output.non_tensor_batch["hpf_transition_suffix_ids"] = self._object_array(suffix_ids)
+            return output
+
+        current_output = assemble_cut_output(
+            cut_index=0,
+            prefix_ids=prefix_plan.current_prefix_ids,
+            prefix_lengths=prefix_plan.current_prefix_lengths,
+        )
+        next_output = assemble_cut_output(
+            cut_index=1,
+            prefix_ids=prefix_plan.next_prefix_ids,
+            prefix_lengths=prefix_plan.next_prefix_lengths,
+        )
+        total_elapsed = time.perf_counter() - rollout_start
+        metrics = {
+            "hpf/tree_rollout_enabled": 1.0,
+            "hpf/transition_aware_rollout_enabled": 1.0,
+            "hpf/horizon_round_index": float(hpf_round_index),
+            "hpf/tree_num_prefixes": float(num_prefixes),
+            "hpf/tree_num_suffixes": 1.0,
+            "hpf/tree_responses_per_prompt": float(num_prefixes),
+            "hpf/tree_horizon_tokens": float(current_horizon),
+            "hpf/transition_next_horizon_tokens": float(next_horizon),
+            "hpf/transition_current_prefix_tokens_mean": float(prefix_plan.current_prefix_lengths.mean()),
+            "hpf/transition_next_prefix_tokens_mean": float(prefix_plan.next_prefix_lengths.mean()),
+            "hpf/transition_current_suffix_empty_frac": float((~prefix_plan.current_needs_suffix).mean()),
+            "hpf/transition_next_suffix_empty_frac": float((~prefix_plan.next_needs_suffix).mean()),
+            "hpf/tree_rollout_log_probs_available": 1.0,
+            "hpf/transition_high_prefix_pad_size": float(high_pad_size),
+            "hpf/transition_low_suffix_pad_size": float(low_pad_size),
+            "timing_s/hpf/transition_high_prefix_rollout_wall": float(high_elapsed),
+            "timing_s/hpf/transition_combined_suffix_rollout_wall": float(low_elapsed),
+            "timing_s/hpf/tree_rollout_total_wall": float(total_elapsed),
+        }
+        timing = {}
+        for key, value in high_timing.items():
+            timing[f"hpf_transition/high_prefix/{key}"] = value
+        for key, value in low_timing.items():
+            timing[f"hpf_transition/combined_suffix/{key}"] = value
+        current_output.meta_info["timing"] = timing
+        print(
+            "[HPF] transition-aware rollout done "
+            f"step={self.global_steps} current_trajectories={len(current_output)} "
+            f"next_trajectories={len(next_output)} elapsed_s={total_elapsed:.2f}",
+            flush=True,
+        )
+        return current_output, next_output, metrics
+
     def _update_critic(self, batch: DataProto) -> DataProto:
         batch_td = batch.to_tensordict()
         # step 2: convert from padding to no-padding
@@ -2551,6 +2861,12 @@ class RayPPOTrainer:
         role_phased_training = self._parse_hpf_bool(role_phased_config.get("enable", False), False)
         mixed_policy_grpo = self._parse_hpf_bool(
             hpf_config.get("mixed_policy_grpo", {}).get("enable", False), False
+        )
+        transition_aware_rollout = self._parse_hpf_bool(
+            hpf_config.get("mixed_policy_grpo", {})
+            .get("transition_aware_rollout", {})
+            .get("enable", False),
+            False,
         )
         physical_total_epochs = int(self.config.trainer.total_epochs)
         if role_phased_training:
@@ -2683,17 +2999,28 @@ class RayPPOTrainer:
                 is_last_step = self.global_steps >= self.total_training_steps
                 with marked_timer("step", timing_raw):
                     # generate a batch
+                    transition_next_gen_output = None
                     with marked_timer("gen", timing_raw, color="red"):
                         if curr_step_profile:
                             self.llm_server_manager.start_profile()
                         if use_hpf_tree_rollout:
-                            gen_batch_output, hpf_tree_metrics = self._generate_hpf_tree_sequences(
-                                gen_batch,
-                                hpf_round_index=hpf_round_index,
-                                num_prefixes=fresh_num_prefixes,
-                                num_suffixes=fresh_num_suffixes,
-                                require_rollout_n_match=role_phase != "leader",
-                            )
+                            if transition_aware_rollout:
+                                (
+                                    gen_batch_output,
+                                    transition_next_gen_output,
+                                    hpf_tree_metrics,
+                                ) = self._generate_hpf_transition_aware_sequences(
+                                    gen_batch,
+                                    hpf_round_index=hpf_round_index,
+                                )
+                            else:
+                                gen_batch_output, hpf_tree_metrics = self._generate_hpf_tree_sequences(
+                                    gen_batch,
+                                    hpf_round_index=hpf_round_index,
+                                    num_prefixes=fresh_num_prefixes,
+                                    num_suffixes=fresh_num_suffixes,
+                                    require_rollout_n_match=role_phase != "leader",
+                                )
                             metrics.update(hpf_tree_metrics)
                             timing_raw.update(gen_batch_output.meta_info["timing"])
                             gen_batch_output.meta_info.pop("timing", None)
@@ -2731,11 +3058,17 @@ class RayPPOTrainer:
                         del combined_gen_batch, combined_gen_output
                     # repeat to align with repeated responses in rollout
                     prompt_batch_for_hpf = batch
+                    transition_next_batch = None
+                    if transition_next_gen_output is not None:
+                        transition_next_batch = batch.repeat(repeat_times=effective_rollout_n, interleave=True)
+                        transition_next_batch = transition_next_batch.union(transition_next_gen_output)
                     batch = batch.repeat(repeat_times=effective_rollout_n, interleave=True)
                     batch = batch.union(gen_batch_output)
 
                     if "response_mask" not in batch.batch.keys():
                         batch.batch["response_mask"] = compute_response_mask(batch)
+                    if transition_next_batch is not None and "response_mask" not in transition_next_batch.batch.keys():
+                        transition_next_batch.batch["response_mask"] = compute_response_mask(transition_next_batch)
                     # Balance the number of valid tokens across DP ranks.
                     # NOTE: This usually changes the order of data in the `batch`,
                     # which won't affect the advantage calculation (since it's based on uid),
@@ -2760,6 +3093,22 @@ class RayPPOTrainer:
 
                         # extract reward_tensor and reward_extra_infos_dict for training
                         reward_tensor, reward_extra_infos_dict = extract_reward(batch)
+                        transition_next_reward_extra_infos_dict = {}
+                        if transition_next_batch is not None:
+                            if self.use_rm and "rm_scores" not in transition_next_batch.batch.keys():
+                                transition_next_reward = self._compute_reward_colocate(transition_next_batch)
+                                transition_next_batch = transition_next_batch.union(transition_next_reward)
+                            (
+                                transition_next_reward_tensor,
+                                transition_next_reward_extra_infos_dict,
+                            ) = extract_reward(transition_next_batch)
+                            transition_next_batch.batch["token_level_scores"] = transition_next_reward_tensor
+                            metrics["hpf/transition_current_reward_mean"] = float(
+                                reward_tensor.sum(dim=-1).float().mean().item()
+                            )
+                            metrics["hpf/transition_next_reward_mean"] = float(
+                                transition_next_reward_tensor.sum(dim=-1).float().mean().item()
+                            )
 
                     # Operating Mode Selection:
                     # - Bypass mode: Sets old_log_probs = rollout_log_probs (2 policies: π_rollout, π_θ)
@@ -2948,6 +3297,13 @@ class RayPPOTrainer:
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
                     if rollout_data_dir:
                         self._log_rollout_data(batch, reward_extra_infos_dict, timing_raw, rollout_data_dir)
+                        if transition_next_batch is not None:
+                            self._log_rollout_data(
+                                transition_next_batch,
+                                transition_next_reward_extra_infos_dict,
+                                timing_raw,
+                                os.path.join(rollout_data_dir, "transition_next"),
+                            )
 
                 # validate
                 if self.config.trainer.test_freq > 0 and (

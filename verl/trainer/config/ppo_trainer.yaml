@@ -189,6 +189,13 @@ algorithm:
       # every valid token in the remaining tail.
       suffix_window_size: null
 
+      # Sample paired trajectories at the current and next prefix cuts. This
+      # rollout-only mode keeps the existing mixed-policy objective on the
+      # current-cut batch and saves the next-cut batch for inspection.
+      transition_aware_rollout:
+
+        enable: False
+
     # Two-stage prefix-follower rollout construction. Disabled by default so
     # existing GRPO and masked HPF smoke paths remain unchanged.
     tree_rollout:
