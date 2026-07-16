@@ -490,6 +490,11 @@ class RayPPOTrainer:
                         "HPF mixed-policy GRPO suffix_window_size must be positive or null, "
                         f"got {suffix_window_size}."
                     )
+                if transition_aware_rollout:
+                    raise ValueError(
+                        "HPF transition-aware objective requires mixed_policy_grpo.suffix_window_size=null "
+                        "so its current-cut GRPO term covers the complete trajectory."
+                    )
             if transition_aware_rollout and int(tree_config.get("num_suffixes", 1)) != 1:
                 raise ValueError(
                     "HPF transition-aware rollout requires tree_rollout.num_suffixes=1; "
@@ -1742,13 +1747,19 @@ class RayPPOTrainer:
         )
         return batch
 
-    def _update_actor_hpf_mixed_policy_grpo(
+    def _prepare_hpf_mixed_policy_grpo_update_batch(
         self,
         batch: DataProto,
         *,
         hpf_round_index: int | None,
-    ) -> DataProto:
-        """Run one masked GRPO update under the tree rollout's mixed policy."""
+    ) -> tuple[DataProto, dict[str, float]]:
+        """Build one cut-specific mixed-policy GRPO batch without updating the actor.
+
+        In transition-aware mode this prepares only the current-cut term
+        ``L_{i,h_i}``. The paired next-cut trajectories are deliberately kept
+        out of this batch so rewards and group-relative advantages cannot mix
+        across cuts.
+        """
         hpf_config = self.config.algorithm.get("hpf_rlvr", {})
         tree_config = hpf_config.get("tree_rollout", {})
         mixed_policy_config = hpf_config.get("mixed_policy_grpo", {})
@@ -1837,13 +1848,30 @@ class RayPPOTrainer:
                 ),
             }
         )
+        return update_batch, metrics
+
+    def _update_actor_hpf_mixed_policy_grpo(
+        self,
+        batch: DataProto,
+        *,
+        hpf_round_index: int | None,
+    ) -> DataProto:
+        """Run one standard GRPO update under the tree rollout's mixed policy."""
+        hpf_config = self.config.algorithm.get("hpf_rlvr", {})
+        update_batch, metrics = self._prepare_hpf_mixed_policy_grpo_update_batch(
+            batch,
+            hpf_round_index=hpf_round_index,
+        )
         print(
             "[HPF] mixed-policy GRPO actor update start "
-            f"step={self.global_steps} batch={len(update_batch)} pad={pad_size} "
-            f"prefix_horizon={prefix_horizon} "
-            f"response_len={response_len_before}->{response_len_after} "
-            f"suffix_window_size={suffix_window_size} "
-            f"prefix_temp={prefix_temperature} suffix_temp={suffix_temperature}",
+            f"step={self.global_steps} batch={len(update_batch)} "
+            f"pad={int(metrics['hpf/mixed_policy_grpo_pad_size'])} "
+            f"prefix_horizon={int(metrics['hpf/mixed_policy_grpo_prefix_horizon_tokens'])} "
+            f"response_len={int(metrics['hpf/mixed_policy_grpo_response_len_before'])}"
+            f"->{int(metrics['hpf/mixed_policy_grpo_response_len_after'])} "
+            f"suffix_window_size={int(metrics['hpf/mixed_policy_grpo_suffix_window_size'])} "
+            f"prefix_temp={metrics['hpf/mixed_policy_grpo_prefix_temperature']} "
+            f"suffix_temp={metrics['hpf/mixed_policy_grpo_suffix_temperature']}",
             flush=True,
         )
         update_start = time.perf_counter()
