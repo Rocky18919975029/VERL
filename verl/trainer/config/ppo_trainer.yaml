@@ -203,6 +203,12 @@ algorithm:
         enable: False
         lambda_trans: 1.0
 
+        # Emit an auditable, model-free verification bundle for smoke tests.
+        # Disabled for normal training to avoid extra host transfers and I/O.
+        diagnostics:
+          enable: False
+          sample_pairs: 8
+
     # Two-stage prefix-follower rollout construction. Disabled by default so
     # existing GRPO and masked HPF smoke paths remain unchanged.
     tree_rollout:

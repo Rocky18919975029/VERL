@@ -28,6 +28,8 @@ HPF_MIXED_POLICY_SUFFIX_WINDOW_SIZE=${HPF_MIXED_POLICY_SUFFIX_WINDOW_SIZE:-null}
 HPF_MIXED_POLICY_TRANSITION_AWARE_ROLLOUT=${HPF_MIXED_POLICY_TRANSITION_AWARE_ROLLOUT:-False}
 HPF_TRANSITION_AWARE_MIXED_POLICY_OPTIMIZATION=${HPF_TRANSITION_AWARE_MIXED_POLICY_OPTIMIZATION:-False}
 HPF_TRANSITION_LAMBDA=${HPF_TRANSITION_LAMBDA:-1.0}
+HPF_TRANSITION_DIAGNOSTICS=${HPF_TRANSITION_DIAGNOSTICS:-False}
+HPF_TRANSITION_DIAGNOSTIC_SAMPLE_PAIRS=${HPF_TRANSITION_DIAGNOSTIC_SAMPLE_PAIRS:-8}
 HPF_FOLLOWER_PHASE_EPOCHS=${HPF_FOLLOWER_PHASE_EPOCHS:-1}
 HPF_LEADER_PHASE_EPOCHS=${HPF_LEADER_PHASE_EPOCHS:-1}
 HPF_PROGRESS_LOG_INTERVAL=${HPF_PROGRESS_LOG_INTERVAL:-1}
@@ -169,6 +171,8 @@ HPF_ARGS=(
     algorithm.hpf_rlvr.mixed_policy_grpo.transition_aware_rollout.enable="${HPF_MIXED_POLICY_TRANSITION_AWARE_ROLLOUT}"
     algorithm.hpf_rlvr.mixed_policy_grpo.transition_aware_optimization.enable="${HPF_TRANSITION_AWARE_MIXED_POLICY_OPTIMIZATION}"
     algorithm.hpf_rlvr.mixed_policy_grpo.transition_aware_optimization.lambda_trans="${HPF_TRANSITION_LAMBDA}"
+    algorithm.hpf_rlvr.mixed_policy_grpo.transition_aware_optimization.diagnostics.enable="${HPF_TRANSITION_DIAGNOSTICS}"
+    algorithm.hpf_rlvr.mixed_policy_grpo.transition_aware_optimization.diagnostics.sample_pairs="${HPF_TRANSITION_DIAGNOSTIC_SAMPLE_PAIRS}"
     algorithm.hpf_rlvr.progress_log_interval="${HPF_PROGRESS_LOG_INTERVAL}"
     actor_rollout_ref.actor.loss_agg_mode="${HPF_LOSS_AGG_MODE}"
 )

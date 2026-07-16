@@ -516,6 +516,13 @@ class RayPPOTrainer:
                 lambda_trans = float(transition_optimization_config.get("lambda_trans", 1.0))
                 if not math.isfinite(lambda_trans) or lambda_trans < 0:
                     raise ValueError("HPF transition lambda_trans must be finite and non-negative.")
+                diagnostics_config = transition_optimization_config.get("diagnostics", {})
+                if self._parse_hpf_bool(diagnostics_config.get("enable", False), False):
+                    sample_pairs = int(diagnostics_config.get("sample_pairs", 8))
+                    if sample_pairs < 0:
+                        raise ValueError("HPF transition diagnostic sample_pairs must be non-negative.")
+                    if not self.config.trainer.get("rollout_data_dir", None):
+                        raise ValueError("HPF transition diagnostics require trainer.rollout_data_dir.")
                 if self._parse_hpf_bool(
                     self.config.actor_rollout_ref.actor.get("use_dynamic_bsz", False), False
                 ):
@@ -1869,6 +1876,36 @@ class RayPPOTrainer:
             follower_old_log_probs=batch.batch["hpf_follower_rollout_old_log_probs"],
         )
         update_batch = mixed.batch
+        diagnostics_enabled = self._parse_hpf_bool(
+            mixed_policy_config.get("transition_aware_optimization", {})
+            .get("diagnostics", {})
+            .get("enable", False),
+            False,
+        )
+
+        def masked_max_abs_error(lhs: torch.Tensor, rhs: torch.Tensor, mask: torch.Tensor) -> float:
+            if not bool(mask.any().item()):
+                return 0.0
+            return float((lhs - rhs).abs().masked_select(mask).max().item())
+
+        diagnostic_metrics = {}
+        if diagnostics_enabled:
+            source_leader_old = batch.batch["hpf_leader_rollout_old_log_probs"].to(
+                device=update_batch.batch["old_log_probs"].device, dtype=torch.float32
+            )
+            source_follower_old = batch.batch["hpf_follower_rollout_old_log_probs"].to(
+                device=update_batch.batch["old_log_probs"].device, dtype=torch.float32
+            )
+            diagnostic_metrics.update(
+                {
+                    "hpf/mixed_policy_grpo_prefix_old_logprob_max_abs_error": masked_max_abs_error(
+                        update_batch.batch["old_log_probs"], source_leader_old, mixed.prefix_mask.bool()
+                    ),
+                    "hpf/mixed_policy_grpo_suffix_old_logprob_max_abs_error": masked_max_abs_error(
+                        update_batch.batch["old_log_probs"], source_follower_old, mixed.suffix_mask.bool()
+                    ),
+                }
+            )
         tree_log_prob_keys = [
             key
             for key in ("hpf_leader_rollout_old_log_probs", "hpf_follower_rollout_old_log_probs")
@@ -1899,6 +1936,20 @@ class RayPPOTrainer:
         )
         update_batch.batch["temperature"] = temperature
         update_batch.meta_info.pop("temperature", None)
+        if diagnostics_enabled:
+            diagnostic_metrics.update(
+                {
+                    "hpf/mixed_policy_grpo_prefix_temperature_max_abs_error": masked_max_abs_error(
+                        temperature, torch.full_like(temperature, prefix_temperature), prefix_mask
+                    ),
+                    "hpf/mixed_policy_grpo_suffix_temperature_max_abs_error": masked_max_abs_error(
+                        temperature, torch.full_like(temperature, suffix_temperature), suffix_mask
+                    ),
+                    "hpf/mixed_policy_grpo_pg_tokens_outside_response": float(
+                        (update_batch.batch["hpf_pg_mask"].bool() & ~response_mask.bool()).sum().item()
+                    ),
+                }
+            )
 
         mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size * int(
             self.config.actor_rollout_ref.rollout.n
@@ -1923,6 +1974,7 @@ class RayPPOTrainer:
                     math.ceil(len(update_batch) / mini_batch_size)
                     * self.config.actor_rollout_ref.actor.ppo_epochs
                 ),
+                **diagnostic_metrics,
             }
         )
         return update_batch, metrics
@@ -1982,6 +2034,220 @@ class RayPPOTrainer:
             global_batch_info={"loss_scale_factor": actor_config.loss_scale_factor},
         )
         return float((-behavior_pg_loss).detach().item())
+
+    def _write_hpf_transition_diagnostics(
+        self,
+        *,
+        current_batch: DataProto,
+        next_batch: DataProto,
+        current_metrics: dict[str, float],
+        next_metrics: dict[str, float],
+        actor_metrics: dict[str, float],
+        current_horizon: int,
+        next_horizon: int,
+        transition_return: float,
+        current_behavior_objective: float,
+        next_behavior_objective: float,
+        static_offset: float,
+        lambda_trans: float,
+        joint_batch_size: int,
+        joint_pad_size: int,
+        response_len_before: int,
+        response_len_after: int,
+    ) -> None:
+        """Write a compact, model-free audit bundle for one transition update."""
+        transition_config = (
+            self.config.algorithm.get("hpf_rlvr", {})
+            .get("mixed_policy_grpo", {})
+            .get("transition_aware_optimization", {})
+        )
+        diagnostics_config = transition_config.get("diagnostics", {})
+        if not self._parse_hpf_bool(diagnostics_config.get("enable", False), False):
+            return
+
+        sample_pairs = int(diagnostics_config.get("sample_pairs", 8))
+        output_dir = os.path.join(
+            str(self.config.trainer.rollout_data_dir), "transition_diagnostics"
+        )
+        os.makedirs(output_dir, exist_ok=True)
+        step = int(self.global_steps)
+
+        def as_strings(values: np.ndarray) -> list[str]:
+            return [str(value) for value in values.tolist()]
+
+        def summarize_cut(batch: DataProto, cut: str, horizon: int) -> tuple[list[dict], dict[str, int]]:
+            response_mask = batch.batch["response_mask"].bool()
+            pg_mask = batch.batch["hpf_pg_mask"].bool()
+            positions = torch.arange(pg_mask.shape[-1], device=pg_mask.device).unsqueeze(0)
+            prefix_mask = pg_mask & (positions < int(horizon))
+            suffix_mask = pg_mask & (positions >= int(horizon))
+            pg_counts = pg_mask.sum(dim=-1)
+            safe_pg_counts = pg_counts.clamp_min(1)
+            advantages = batch.batch["advantages"].float()
+            advantage_means = (advantages * pg_mask).sum(dim=-1) / safe_pg_counts
+            advantage_max = advantages.masked_fill(~pg_mask, float("-inf")).max(dim=-1).values
+            advantage_min = advantages.masked_fill(~pg_mask, float("inf")).min(dim=-1).values
+            advantage_spans = torch.where(
+                pg_counts > 0, advantage_max - advantage_min, torch.zeros_like(advantage_max)
+            )
+            old_log_probs = batch.batch["old_log_probs"].float()
+            temperatures = batch.batch["temperature"].float()
+            scores = batch.batch["token_level_scores"].sum(dim=-1).float()
+
+            def masked_row_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+                counts = mask.sum(dim=-1)
+                return torch.where(
+                    counts > 0,
+                    (values * mask).sum(dim=-1) / counts.clamp_min(1),
+                    torch.zeros_like(counts, dtype=values.dtype),
+                )
+
+            pair_ids = as_strings(batch.non_tensor_batch["hpf_transition_pair_uid"])
+            group_ids = as_strings(batch.non_tensor_batch["uid"])
+            columns = {
+                "score": scores.detach().cpu().tolist(),
+                "advantage": advantage_means.detach().cpu().tolist(),
+                "advantage_span": advantage_spans.detach().cpu().tolist(),
+                "response_tokens": response_mask.sum(dim=-1).detach().cpu().tolist(),
+                "pg_tokens": pg_counts.detach().cpu().tolist(),
+                "prefix_pg_tokens": prefix_mask.sum(dim=-1).detach().cpu().tolist(),
+                "suffix_pg_tokens": suffix_mask.sum(dim=-1).detach().cpu().tolist(),
+                "prefix_old_logprob_mean": masked_row_mean(old_log_probs, prefix_mask).detach().cpu().tolist(),
+                "suffix_old_logprob_mean": masked_row_mean(old_log_probs, suffix_mask).detach().cpu().tolist(),
+                "prefix_temperature_mean": masked_row_mean(temperatures, prefix_mask).detach().cpu().tolist(),
+                "suffix_temperature_mean": masked_row_mean(temperatures, suffix_mask).detach().cpu().tolist(),
+            }
+            rows = []
+            for index, (pair_id, group_id) in enumerate(zip(pair_ids, group_ids, strict=True)):
+                row = {"cut": cut, "pair_uid": pair_id, "group_uid": group_id}
+                row.update({key: value[index] for key, value in columns.items()})
+                rows.append(row)
+            return rows, {pair_id: index for index, pair_id in enumerate(pair_ids)}
+
+        current_rows, current_index = summarize_cut(current_batch, "current", current_horizon)
+        next_rows, next_index = summarize_cut(next_batch, "next", next_horizon)
+        if current_index.keys() != next_index.keys():
+            raise ValueError("Cannot write transition diagnostics for mismatched pair IDs.")
+
+        current_reward_mean = sum(float(row["score"]) for row in current_rows) / len(current_rows)
+        next_reward_mean = sum(float(row["score"]) for row in next_rows) / len(next_rows)
+        dynamic = {
+            key.removeprefix("actor/transition_"): float(value)
+            for key, value in actor_metrics.items()
+            if key.startswith("actor/transition_")
+        }
+        current_pg_loss = dynamic.get("current_pg_loss")
+        next_pg_loss = dynamic.get("next_pg_loss")
+        surrogate = dynamic.get("surrogate")
+        penalty = dynamic.get("penalty")
+        objective_loss = dynamic.get("objective_loss")
+        summary = {
+            "schema_version": 1,
+            "mode": "transition-aware mixed policy optimization",
+            "step": step,
+            "num_pairs": len(current_rows),
+            "current_horizon": int(current_horizon),
+            "next_horizon": int(next_horizon),
+            "transition_width": int(next_horizon - current_horizon),
+            "lambda_trans": float(lambda_trans),
+            "loss_agg_mode": str(self.config.actor_rollout_ref.actor.loss_agg_mode),
+            "loss_scale_factor": self.config.actor_rollout_ref.actor.loss_scale_factor,
+            "sample_pairs": min(sample_pairs, len(current_rows)),
+            "batch": {
+                "current_rows": len(current_rows),
+                "next_rows": len(next_rows),
+                "joint_rows": int(joint_batch_size),
+                "joint_pad_rows": int(joint_pad_size),
+                "response_len_before": int(response_len_before),
+                "response_len_after": int(response_len_after),
+            },
+            "rollout": {
+                "pair_uid_sets_equal": current_index.keys() == next_index.keys(),
+                "current_reward_mean": current_reward_mean,
+                "next_reward_mean": next_reward_mean,
+                "transition_return": float(transition_return),
+                "transition_return_residual": float(
+                    transition_return - (next_reward_mean - current_reward_mean)
+                ),
+            },
+            "behavior": {
+                "current_objective": float(current_behavior_objective),
+                "next_objective": float(next_behavior_objective),
+                "static_offset": float(static_offset),
+                "static_offset_residual": float(
+                    static_offset
+                    - (transition_return + current_behavior_objective - next_behavior_objective)
+                ),
+            },
+            "current_cut_preparation": current_metrics,
+            "next_cut_preparation": next_metrics,
+            "actor_metrics": {key: float(value) for key, value in actor_metrics.items()},
+            "dynamic": dynamic,
+            "identities": {
+                "surrogate_residual": None
+                if surrogate is None or current_pg_loss is None or next_pg_loss is None
+                else float(surrogate - (static_offset + current_pg_loss - next_pg_loss)),
+                "objective_loss_residual": None
+                if objective_loss is None or current_pg_loss is None or penalty is None
+                else float(objective_loss - (current_pg_loss + lambda_trans * penalty)),
+            },
+        }
+
+        selected_pair_ids = list(current_index)[:sample_pairs]
+        samples = []
+        for pair_id in selected_pair_ids:
+            for cut, batch, index in (
+                ("current", current_batch, current_index[pair_id]),
+                ("next", next_batch, next_index[pair_id]),
+            ):
+                valid_length = int(batch.batch["response_mask"][index].sum().item())
+                samples.append(
+                    {
+                        "cut": cut,
+                        "pair_uid": pair_id,
+                        "response_ids": batch.batch["responses"][index, :valid_length].detach().cpu().tolist(),
+                        "pg_mask": batch.batch["hpf_pg_mask"][index, :valid_length].bool().detach().cpu().tolist(),
+                        "old_log_probs": batch.batch["old_log_probs"][index, :valid_length]
+                        .float()
+                        .detach()
+                        .cpu()
+                        .tolist(),
+                        "temperature": batch.batch["temperature"][index, :valid_length]
+                        .float()
+                        .detach()
+                        .cpu()
+                        .tolist(),
+                        "advantages": batch.batch["advantages"][index, :valid_length]
+                        .float()
+                        .detach()
+                        .cpu()
+                        .tolist(),
+                    }
+                )
+
+        def write_json(path: str, value: Any) -> None:
+            temporary = f"{path}.tmp"
+            with open(temporary, "w") as file:
+                json.dump(value, file, ensure_ascii=False, indent=2, default=str)
+                file.write("\n")
+            os.replace(temporary, path)
+
+        def write_jsonl(path: str, values: list[dict]) -> None:
+            temporary = f"{path}.tmp"
+            with open(temporary, "w") as file:
+                for value in values:
+                    file.write(json.dumps(value, ensure_ascii=False, default=str) + "\n")
+            os.replace(temporary, path)
+
+        write_json(os.path.join(output_dir, f"step_{step}_summary.json"), summary)
+        write_jsonl(os.path.join(output_dir, f"step_{step}_rows.jsonl"), current_rows + next_rows)
+        write_jsonl(os.path.join(output_dir, f"step_{step}_samples.jsonl"), samples)
+        print(
+            "[HPF] transition diagnostic bundle written "
+            f"step={step} dir={output_dir} rows={len(current_rows) + len(next_rows)} "
+            f"sample_pairs={len(selected_pair_ids)}",
+            flush=True,
+        )
 
     def _update_actor_hpf_transition_aware_mixed_policy(
         self,
@@ -2116,6 +2382,24 @@ class RayPPOTrainer:
         metrics["timing_s/hpf/transition_aware_mixed_policy_update_actor"] = float(elapsed)
         actor_metrics = reduce_metrics(actor_output.meta_info["metrics"])
         metrics.update(rename_dict(actor_metrics, "hpf/transition_aware_mixed_policy/"))
+        self._write_hpf_transition_diagnostics(
+            current_batch=current_update,
+            next_batch=next_update,
+            current_metrics=current_metrics,
+            next_metrics=next_metrics,
+            actor_metrics=actor_metrics,
+            current_horizon=current_horizon,
+            next_horizon=next_horizon,
+            transition_return=transition_return,
+            current_behavior_objective=current_behavior_objective,
+            next_behavior_objective=next_behavior_objective,
+            static_offset=static_offset,
+            lambda_trans=lambda_trans,
+            joint_batch_size=len(combined),
+            joint_pad_size=pad_size,
+            response_len_before=response_len_before,
+            response_len_after=response_len_after,
+        )
         return DataProto.from_single_dict(data={}, meta_info={"metrics": metrics})
 
     def _update_actor_hpf_masked_grpo(

@@ -153,6 +153,8 @@ echo "HPF mixed-policy suffix window size: ${HPF_MIXED_POLICY_SUFFIX_WINDOW_SIZE
 echo "HPF mixed-policy transition-aware rollout: ${HPF_MIXED_POLICY_TRANSITION_AWARE_ROLLOUT:-False}"
 echo "HPF transition-aware mixed policy optimization: ${HPF_TRANSITION_AWARE_MIXED_POLICY_OPTIMIZATION:-False}"
 echo "HPF transition lambda: ${HPF_TRANSITION_LAMBDA:-1.0}"
+echo "HPF transition diagnostics: ${HPF_TRANSITION_DIAGNOSTICS:-False}"
+echo "HPF transition diagnostic sample pairs: ${HPF_TRANSITION_DIAGNOSTIC_SAMPLE_PAIRS:-8}"
 echo "HPF follower phase epochs: ${HPF_FOLLOWER_PHASE_EPOCHS:-1}"
 echo "HPF leader phase epochs: ${HPF_LEADER_PHASE_EPOCHS:-1}"
 
@@ -178,3 +180,12 @@ ROLLOUT_GPU_MEMORY_UTILIZATION="${ROLLOUT_GPU_MEMORY_UTILIZATION}" \
 NNODES=1 \
 NGPUS_PER_NODE=8 \
 bash examples/grpo_trainer/run_qwen2_5_math_7b_hpf_masked_grpo.sh "$@"
+
+if [ "${HPF_TRANSITION_DIAGNOSTICS:-False}" = "True" ] \
+    || [ "${HPF_TRANSITION_DIAGNOSTICS:-False}" = "true" ] \
+    || [ "${HPF_TRANSITION_DIAGNOSTICS:-False}" = "1" ]; then
+    RUN_DIR="${ROLLOUT_DATA_DIR:-./rollout_data/${PROJECT_NAME}/${RUN_NAME}}"
+    python examples/generation/check_transition_aware_optimization.py \
+        --run-dir "${RUN_DIR}" \
+        --step "${TOTAL_TRAINING_STEPS:-1}"
+fi
