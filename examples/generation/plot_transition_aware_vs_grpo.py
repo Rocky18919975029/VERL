@@ -231,17 +231,6 @@ def make_plot(metrics: pd.DataFrame, specs: list[RunSpec], output_dir: Path) -> 
             linewidth=2.4,
             label=spec.label,
         )
-        if frame["next_train_acc"].notna().any():
-            axes[0].plot(
-                frame["step"],
-                frame["next_train_acc"],
-                color=spec.color,
-                marker=spec.marker,
-                linewidth=1.8,
-                linestyle="--",
-                alpha=0.65,
-                label=f"{spec.label} next cut",
-            )
         axes[1].plot(
             frame["step"],
             frame["eval_acc"],
@@ -322,13 +311,29 @@ def main() -> None:
     else:
         print("WARNING: no complete lambda=0.5 run discovered")
 
-    grpo_dir = resolve_run(args.grpo_run_dir, args.grpo_project_dir, paired=False, label="GRPO n=32")
+    grpo_dir = resolve_run(
+        args.grpo_run_dir,
+        args.grpo_project_dir,
+        paired=False,
+        label="GRPO n=32 (forward-recomputed behavior log-prob)",
+    )
     if grpo_dir is not None:
         specs.append(
-            RunSpec("GRPO n=32", grpo_dir, "#238b45", "^", False, 16384, "slurm-verl-resched-grpo")
+            RunSpec(
+                "GRPO n=32 (forward-recomputed behavior log-prob)",
+                grpo_dir,
+                "#238b45",
+                "^",
+                False,
+                16384,
+                "slurm-verl-resched-grpo",
+            )
         )
     else:
-        print("WARNING: no complete GRPO n=32 run discovered; rerun after its first rollout dump")
+        print(
+            "WARNING: no complete GRPO n=32 forward-recompute run discovered; "
+            "rerun after its first rollout dump"
+        )
 
     grpo_vllm_n16_dir = resolve_run(
         args.grpo_vllm_n16_run_dir,
