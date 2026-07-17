@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Incrementally compare two transition-aware lambdas with a GRPO baseline."""
+"""Incrementally compare two transition-aware lambdas with GRPO baselines."""
 
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ DEFAULT_LAMBDA05_PROJECT = Path(
     "rollout_data/hpf_transition_aware_fulltail_k16_lambda0p5_mini1536_boxed_seed42"
 )
 DEFAULT_GRPO_PROJECT = Path("rollout_data/grpo_dapo_math17k_mini1536_boxed_n32_seed42")
+DEFAULT_GRPO_VLLM_PROJECT = Path("rollout_data/grpo_vllm_logprob_mini1536_boxed_seed42")
 
 
 @dataclass(frozen=True)
@@ -49,6 +50,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lambda05-project-dir", type=Path, default=DEFAULT_LAMBDA05_PROJECT)
     parser.add_argument("--grpo-run-dir", type=Path)
     parser.add_argument("--grpo-project-dir", type=Path, default=DEFAULT_GRPO_PROJECT)
+    parser.add_argument("--grpo-vllm-run-dir", type=Path)
+    parser.add_argument("--grpo-vllm-project-dir", type=Path, default=DEFAULT_GRPO_VLLM_PROJECT)
     parser.add_argument("--slurm-log-dir", type=Path, default=Path("."))
     parser.add_argument(
         "--output-dir",
@@ -260,7 +263,7 @@ def make_plot(metrics: pd.DataFrame, specs: list[RunSpec], output_dir: Path) -> 
 
     fig.suptitle(
         "Transition-aware mixed-policy optimization vs full-trajectory GRPO\n"
-        "matched rollout and actor-row budget, mini1536, seed42",
+        "mini1536, strict boxed verifier, seed42",
         fontsize=16,
     )
     fig.tight_layout(rect=[0, 0, 1, 0.88])
@@ -323,6 +326,30 @@ def main() -> None:
         )
     else:
         print("WARNING: no complete GRPO n=32 run discovered; rerun after its first rollout dump")
+
+    grpo_vllm_dir = resolve_run(
+        args.grpo_vllm_run_dir,
+        args.grpo_vllm_project_dir,
+        paired=False,
+        label="GRPO n=16 (vLLM behavior log-prob)",
+    )
+    if grpo_vllm_dir is not None:
+        specs.append(
+            RunSpec(
+                "GRPO n=16 (vLLM behavior log-prob)",
+                grpo_vllm_dir,
+                "#7a3db8",
+                "D",
+                False,
+                8192,
+                "slurm-verl-resched-grpo",
+            )
+        )
+    else:
+        print(
+            "WARNING: no complete GRPO n=16 vLLM-logprob run discovered; "
+            "rerun after its first rollout dump"
+        )
 
     frames = []
     for spec in specs:
