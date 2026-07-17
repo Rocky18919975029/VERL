@@ -21,7 +21,7 @@ DEFAULT_LAMBDA05_PROJECT = Path(
     "rollout_data/hpf_transition_aware_fulltail_k16_lambda0p5_mini1536_boxed_seed42"
 )
 DEFAULT_GRPO_PROJECT = Path("rollout_data/grpo_dapo_math17k_mini1536_boxed_n32_seed42")
-DEFAULT_GRPO_VLLM_PROJECT = Path("rollout_data/grpo_vllm_logprob_mini1536_boxed_seed42")
+DEFAULT_GRPO_VLLM_PROJECT = Path("rollout_data/grpo_vllm_logprob_n32_mini1536_boxed_seed42")
 
 
 @dataclass(frozen=True)
@@ -263,7 +263,7 @@ def make_plot(metrics: pd.DataFrame, specs: list[RunSpec], output_dir: Path) -> 
 
     fig.suptitle(
         "Transition-aware mixed-policy optimization vs full-trajectory GRPO\n"
-        "mini1536, strict boxed verifier, seed42",
+        "matched rollout and actor-row budget, mini1536, seed42",
         fontsize=16,
     )
     fig.tight_layout(rect=[0, 0, 1, 0.88])
@@ -331,23 +331,23 @@ def main() -> None:
         args.grpo_vllm_run_dir,
         args.grpo_vllm_project_dir,
         paired=False,
-        label="GRPO n=16 (vLLM behavior log-prob)",
+        label="GRPO n=32 (vLLM behavior log-prob)",
     )
     if grpo_vllm_dir is not None:
         specs.append(
             RunSpec(
-                "GRPO n=16 (vLLM behavior log-prob)",
+                "GRPO n=32 (vLLM behavior log-prob)",
                 grpo_vllm_dir,
                 "#7a3db8",
                 "D",
                 False,
-                8192,
+                16384,
                 "slurm-verl-resched-grpo",
             )
         )
     else:
         print(
-            "WARNING: no complete GRPO n=16 vLLM-logprob run discovered; "
+            "WARNING: no complete GRPO n=32 vLLM-logprob run discovered; "
             "rerun after its first rollout dump"
         )
 
