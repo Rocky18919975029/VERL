@@ -99,6 +99,27 @@ if ! [[ "${LAMBDA_TRANS}" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][-+]?[0-9]+)?$ 
     exit 2
 fi
 
+CANONICAL_LAMBDA=$(awk -v value="${LAMBDA_TRANS}" 'BEGIN { printf "%.12g", value + 0 }')
+LAMBDA_MARKER=lambda$(printf '%s' "${CANONICAL_LAMBDA}" | sed -e 's/-/m/g' -e 's/\./p/g' -e 's/+//g')
+DECLARED_LAMBDA_MARKERS=$(
+    printf '%s\n%s\n' "${PROJECT}" "${RUN_NAME}" \
+        | grep -oE 'lambda[0-9]+(p[0-9]+)?' \
+        | sort -u \
+        | tr '\n' ' ' \
+        || true
+)
+for marker in ${DECLARED_LAMBDA_MARKERS}; do
+    if [ "${marker}" != "${LAMBDA_MARKER}" ]; then
+        echo "ERROR: checkpoint lineage declares ${marker}, but requested lambda is ${CANONICAL_LAMBDA} (${LAMBDA_MARKER})" >&2
+        exit 2
+    fi
+done
+if [ "${CANONICAL_LAMBDA}" != "1" ] && [ -z "${DECLARED_LAMBDA_MARKERS}" ]; then
+    echo "ERROR: non-default lambda ${CANONICAL_LAMBDA} requires ${LAMBDA_MARKER} in the project or run name" >&2
+    echo "ERROR: refusing to resume an unlabelled checkpoint with a different lambda" >&2
+    exit 2
+fi
+
 VERL_WORKDIR=${VERL_WORKDIR:-$(pwd)}
 MODEL_PATH=${MODEL_PATH:-/data/user/zhongal/.cache/qwen2.5-math-7b-local}
 DATA_DIR=${DATA_DIR:-/data/user/zhongal/data/reschedule}
