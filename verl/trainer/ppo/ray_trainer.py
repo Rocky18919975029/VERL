@@ -3867,7 +3867,18 @@ class RayPPOTrainer:
                                     role_responses_per_prompt=effective_rollout_n,
                                 )
                             else:
-                                actor_output = self._update_actor(batch)
+                                actor_progress_log_interval = int(
+                                    self.config.trainer.get("actor_progress_log_interval", 0) or 0
+                                )
+                                actor_output = self._update_actor(
+                                    batch,
+                                    progress_label=(
+                                        f"grpo/step-{self.global_steps}"
+                                        if actor_progress_log_interval > 0
+                                        else None
+                                    ),
+                                    progress_log_interval=actor_progress_log_interval,
+                                )
 
                         # Check if the ESI (Elastic Server Instance)/training plan is close to expiration.
                         esi_close_to_expiration = should_save_ckpt_esi(

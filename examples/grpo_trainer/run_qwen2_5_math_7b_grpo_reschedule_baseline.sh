@@ -38,6 +38,7 @@ ROLLOUT_N=${ROLLOUT_N:-8}
 PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-32}
 PPO_MICRO_BATCH_SIZE_PER_GPU=${PPO_MICRO_BATCH_SIZE_PER_GPU:-8}
 LOG_PROB_MICRO_BATCH_SIZE_PER_GPU=${LOG_PROB_MICRO_BATCH_SIZE_PER_GPU:-8}
+ACTOR_PROGRESS_LOG_INTERVAL=${ACTOR_PROGRESS_LOG_INTERVAL:-1}
 
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024}
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-3072}
@@ -151,6 +152,7 @@ TRAINER_COMMON=(
     trainer.test_freq=${TEST_FREQ:-1}
     trainer.total_epochs=${TOTAL_EPOCHS}
     trainer.resume_mode=${RESUME_MODE:-disable}
+    +trainer.actor_progress_log_interval=${ACTOR_PROGRESS_LOG_INTERVAL}
     +trainer.save_best_only=${SAVE_BEST_ONLY:-False}
     +trainer.delete_old_best_checkpoint=${DELETE_OLD_BEST_CHECKPOINT:-False}
     +trainer.save_after=${SAVE_AFTER:-60}
