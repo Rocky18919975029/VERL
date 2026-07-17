@@ -19,6 +19,57 @@
 set -xeuo pipefail
 
 VERL_WORKDIR=${VERL_WORKDIR:-${SLURM_SUBMIT_DIR}}
+PROJECT_NAME=${PROJECT_NAME:-hpf_masked_grpo_dapo_math17k}
+# RUN_NAME is the canonical training/checkpoint name. Keep EXPERIMENT_NAME as
+# a backwards-compatible alias for older submission commands.
+RUN_NAME=${RUN_NAME:-${EXPERIMENT_NAME:-qwen2_5_math_7b_hpf_masked_grpo_${SLURM_JOB_ID}}}
+RESUME_MODE=${RESUME_MODE:-disable}
+
+if [ -n "${EXPECTED_RESUME_STEP:-}" ]; then
+    if [ "${RESUME_MODE}" != "auto" ] && [ "${RESUME_MODE}" != "resume_path" ]; then
+        echo "[RESUME-GUARD] ERROR: RESUME_MODE=${RESUME_MODE}, expected auto or resume_path" >&2
+        exit 1
+    fi
+    if [ -n "${EXPECTED_PROJECT_NAME:-}" ] && [ "${PROJECT_NAME}" != "${EXPECTED_PROJECT_NAME}" ]; then
+        echo "[RESUME-GUARD] ERROR: project mismatch: actual=${PROJECT_NAME} expected=${EXPECTED_PROJECT_NAME}" >&2
+        exit 1
+    fi
+    if [ -n "${EXPECTED_RUN_NAME:-}" ] && [ "${RUN_NAME}" != "${EXPECTED_RUN_NAME}" ]; then
+        echo "[RESUME-GUARD] ERROR: run mismatch: actual=${RUN_NAME} expected=${EXPECTED_RUN_NAME}" >&2
+        exit 1
+    fi
+    if [ -n "${EXPECTED_TRANSITION_LAMBDA:-}" ] \
+        && [ "${HPF_TRANSITION_LAMBDA:-}" != "${EXPECTED_TRANSITION_LAMBDA}" ]; then
+        echo "[RESUME-GUARD] ERROR: lambda mismatch: actual=${HPF_TRANSITION_LAMBDA:-unset} expected=${EXPECTED_TRANSITION_LAMBDA}" >&2
+        exit 1
+    fi
+    if [ "${TOTAL_TRAINING_STEPS:-0}" -le "${EXPECTED_RESUME_STEP}" ]; then
+        echo "[RESUME-GUARD] ERROR: TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-0} must exceed EXPECTED_RESUME_STEP=${EXPECTED_RESUME_STEP}" >&2
+        exit 1
+    fi
+
+    RESUME_CKPT_ROOT=${CHECKPOINT_ROOT:-${VERL_WORKDIR}/checkpoints/${PROJECT_NAME}/${RUN_NAME}}
+    RESUME_LATEST_FILE=${RESUME_CKPT_ROOT}/latest_checkpointed_iteration.txt
+    RESUME_STEP_DIR=${RESUME_CKPT_ROOT}/global_step_${EXPECTED_RESUME_STEP}
+    if [ ! -f "${RESUME_LATEST_FILE}" ]; then
+        echo "[RESUME-GUARD] ERROR: missing ${RESUME_LATEST_FILE}" >&2
+        exit 1
+    fi
+    RESUME_LATEST=$(tr -d '[:space:]' < "${RESUME_LATEST_FILE}")
+    if [ "${RESUME_LATEST}" != "${EXPECTED_RESUME_STEP}" ]; then
+        echo "[RESUME-GUARD] ERROR: latest checkpoint=${RESUME_LATEST}, expected=${EXPECTED_RESUME_STEP}" >&2
+        exit 1
+    fi
+    if [ ! -d "${RESUME_STEP_DIR}/actor" ] || [ ! -f "${RESUME_STEP_DIR}/data.pt" ]; then
+        echo "[RESUME-GUARD] ERROR: incomplete checkpoint at ${RESUME_STEP_DIR}" >&2
+        exit 1
+    fi
+    if ! compgen -G "${RESUME_STEP_DIR}/actor/optim_world_size_*" >/dev/null; then
+        echo "[RESUME-GUARD] ERROR: optimizer shards missing from ${RESUME_STEP_DIR}/actor" >&2
+        exit 1
+    fi
+    echo "[RESUME-GUARD] PASS project=${PROJECT_NAME} run=${RUN_NAME} lambda=${HPF_TRANSITION_LAMBDA:-unset} from_step=${EXPECTED_RESUME_STEP} to_step=${TOTAL_TRAINING_STEPS}"
+fi
 
 # Do not globally preload alternate glibc libraries into conda/Python.
 LD_LIBRARY_PATH=":${LD_LIBRARY_PATH:-}:"
@@ -121,11 +172,6 @@ export CUDAHOSTCXX=${CUDAHOSTCXX:-$(which g++)}
 export TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST:-9.0}
 
 mkdir -p "${WANDB_DIR}" "${RAY_TMP_DIR}"
-
-PROJECT_NAME=${PROJECT_NAME:-hpf_masked_grpo_dapo_math17k}
-# RUN_NAME is the canonical training/checkpoint name. Keep EXPERIMENT_NAME as
-# a backwards-compatible alias for older submission commands.
-RUN_NAME=${RUN_NAME:-${EXPERIMENT_NAME:-qwen2_5_math_7b_hpf_masked_grpo_${SLURM_JOB_ID}}}
 
 echo "Job ID: ${SLURM_JOB_ID}"
 echo "Node list: ${SLURM_JOB_NODELIST}"
