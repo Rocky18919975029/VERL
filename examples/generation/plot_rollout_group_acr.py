@@ -128,7 +128,7 @@ def plot_metrics(metrics: pd.DataFrame, output_path: Path, title: str) -> None:
     from matplotlib.ticker import PercentFormatter
 
     plt.style.use("seaborn-v0_8-whitegrid")
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4.8), sharex=True, sharey=True)
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5.2), sharex=True, sharey=True)
     panels = [
         ("acr", "ACR (collapsed-group fraction)"),
         ("mixed_group_frac", "Useful mixed-group fraction (1 - ACR)"),
@@ -145,9 +145,16 @@ def plot_metrics(metrics: pd.DataFrame, output_path: Path, title: str) -> None:
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
     handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="upper center", ncol=min(4, max(1, len(labels))), frameon=False)
-    fig.suptitle(title, y=0.99, fontsize=15)
-    fig.tight_layout(rect=(0, 0, 1, 0.91))
+    fig.suptitle(title, y=0.98, fontsize=15)
+    fig.legend(
+        handles,
+        labels,
+        loc="upper center",
+        ncol=min(3, max(1, len(labels))),
+        frameon=False,
+        bbox_to_anchor=(0.5, 0.91),
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.79))
     fig.savefig(output_path, dpi=220, bbox_inches="tight")
     plt.close(fig)
 
