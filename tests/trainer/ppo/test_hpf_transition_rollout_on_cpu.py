@@ -7,7 +7,11 @@ import pytest
 import torch
 
 from verl import DataProto
-from verl.trainer.ppo.hpf_utils import build_hpf_transition_prefix_plan, estimate_hpf_transition_return
+from verl.trainer.ppo.hpf_utils import (
+    build_hpf_transition_prefix_plan,
+    configure_hpf_transition_behavior_log_probs,
+    estimate_hpf_transition_return,
+)
 from verl.workers.utils.losses import _hpf_transition_combine_policy_losses
 
 
@@ -80,6 +84,48 @@ def test_transition_return_estimate_aligns_paired_rollouts():
     assert estimate.current_mean == pytest.approx(1.5)
     assert estimate.next_mean == pytest.approx(4.0)
     assert estimate.delta_mean == pytest.approx(2.5)
+
+
+def test_transition_behavior_log_probs_reuse_vllm_values_without_recompute():
+    current = DataProto.from_single_dict({"old_log_probs": torch.tensor([[1.0]])})
+    next_cut = DataProto.from_single_dict({"old_log_probs": torch.tensor([[2.0]])})
+
+    def fail_if_called(_batch):
+        raise AssertionError("recompute_fn must not be called in rollout reuse mode")
+
+    source = configure_hpf_transition_behavior_log_probs(
+        current,
+        next_cut,
+        reuse_rollout_log_probs=True,
+        recompute_fn=fail_if_called,
+    )
+
+    assert source == "vllm_tree_rollout"
+    assert current.batch["old_log_probs"].item() == 1.0
+    assert next_cut.batch["old_log_probs"].item() == 2.0
+
+
+def test_transition_behavior_log_probs_recompute_both_mixed_temperature_cuts():
+    current = DataProto.from_single_dict({"old_log_probs": torch.tensor([[1.0]])})
+    next_cut = DataProto.from_single_dict({"old_log_probs": torch.tensor([[2.0]])})
+    calls = []
+
+    def recompute(batch):
+        calls.append(batch)
+        value = 10.0 + len(calls)
+        return DataProto.from_single_dict({"old_log_probs": torch.tensor([[value]])})
+
+    source = configure_hpf_transition_behavior_log_probs(
+        current,
+        next_cut,
+        reuse_rollout_log_probs=False,
+        recompute_fn=recompute,
+    )
+
+    assert source == "actor_mixed_temperature_forward"
+    assert calls == [current, next_cut]
+    assert current.batch["old_log_probs"].item() == 11.0
+    assert next_cut.batch["old_log_probs"].item() == 12.0
 
 
 def test_transition_policy_loss_uses_current_once_when_hinge_is_inactive():

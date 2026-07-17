@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
 import numpy as np
 import torch
@@ -52,6 +53,32 @@ class HPFTransitionReturnEstimate:
             "hpf/transition_return_delta_positive_frac": self.delta_positive_frac,
             "hpf/transition_return_num_pairs": float(self.num_pairs),
         }
+
+
+def configure_hpf_transition_behavior_log_probs(
+    current_batch: DataProto,
+    next_batch: DataProto,
+    *,
+    reuse_rollout_log_probs: bool,
+    recompute_fn: Callable[[DataProto], DataProto] | None = None,
+) -> str:
+    """Select the configured behavior log-prob source for both transition cuts."""
+    batches = {"current": current_batch, "next": next_batch}
+    for cut, batch in batches.items():
+        if "old_log_probs" not in batch.batch:
+            raise ValueError(f"Transition {cut}-cut batch is missing rollout old_log_probs.")
+
+    if reuse_rollout_log_probs:
+        return "vllm_tree_rollout"
+    if recompute_fn is None:
+        raise ValueError("Transition behavior log-prob recomputation requires recompute_fn.")
+
+    for cut, batch in batches.items():
+        recomputed = recompute_fn(batch)
+        if "old_log_probs" not in recomputed.batch:
+            raise ValueError(f"Recomputed transition {cut}-cut batch is missing old_log_probs.")
+        batch.batch["old_log_probs"] = recomputed.batch["old_log_probs"]
+    return "actor_mixed_temperature_forward"
 
 
 def estimate_hpf_transition_return(

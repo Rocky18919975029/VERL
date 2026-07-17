@@ -49,6 +49,7 @@ from verl.trainer.ppo.hpf_utils import (
     build_hpf_masked_batches,
     build_hpf_mixed_policy_grpo_batch,
     build_hpf_transition_prefix_plan,
+    configure_hpf_transition_behavior_log_probs,
     estimate_hpf_transition_return,
 )
 from verl.trainer.ppo.hpf_schedule import get_hpf_role_phase
@@ -2287,6 +2288,31 @@ class RayPPOTrainer:
             pad_to_mini_batch=False,
         )
 
+        rollout_corr_config = self.config.algorithm.get("rollout_correction", {})
+        reuse_rollout_log_probs = self._parse_hpf_bool(
+            rollout_corr_config.get("bypass_mode", False), False
+        )
+        behavior_log_prob_start = time.perf_counter()
+        behavior_log_prob_source = configure_hpf_transition_behavior_log_probs(
+            current_update,
+            next_update,
+            reuse_rollout_log_probs=reuse_rollout_log_probs,
+            recompute_fn=(
+                None
+                if reuse_rollout_log_probs
+                else lambda update_batch: self._compute_old_log_prob(
+                    update_batch, calculate_entropy=False
+                )[0]
+            ),
+        )
+        behavior_log_prob_elapsed = time.perf_counter() - behavior_log_prob_start
+        print(
+            "[HPF] transition behavior old_log_prob ready "
+            f"step={self.global_steps} source={behavior_log_prob_source} "
+            f"elapsed_s={behavior_log_prob_elapsed:.2f}",
+            flush=True,
+        )
+
         current_behavior_objective = self._compute_hpf_behavior_grpo_objective(current_update)
         next_behavior_objective = self._compute_hpf_behavior_grpo_objective(next_update)
         transition_return = float(current_batch.meta_info["hpf_transition_return_estimate"])
@@ -2350,6 +2376,8 @@ class RayPPOTrainer:
             "hpf/transition_joint_pad_size": float(pad_size),
             "hpf/transition_response_len_before": float(response_len_before),
             "hpf/transition_response_len_after": float(response_len_after),
+            "hpf/transition_reuse_rollout_log_probs": float(reuse_rollout_log_probs),
+            "timing_s/hpf/transition_behavior_old_log_prob": behavior_log_prob_elapsed,
         }
         print(
             "[HPF] transition-aware mixed policy optimization start "
@@ -3690,13 +3718,24 @@ class RayPPOTrainer:
                     #   Note: π_old computed once per data batch, serves as stable reference during mini-batch updates
                     rollout_corr_config = self.config.algorithm.get("rollout_correction", None)
                     bypass_recomputing_logprobs = rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
+                    transition_manages_old_log_prob = (
+                        use_hpf_tree_rollout
+                        and transition_aware_optimization
+                        and not self.config.algorithm.use_kl_in_reward
+                    )
                     skip_shared_old_log_prob = (
                         use_hpf_tree_rollout
                         and not self.config.algorithm.use_kl_in_reward
-                        and rollout_corr_config is None
+                        and (rollout_corr_config is None or transition_manages_old_log_prob)
                     )
                     if skip_shared_old_log_prob:
                         metrics["hpf/skipped_shared_old_log_prob"] = 1.0
+                        if transition_manages_old_log_prob:
+                            print(
+                                "[HPF] shared old_log_prob skipped "
+                                f"step={self.global_steps} source=transition_configured_behavior_log_prob",
+                                flush=True,
+                            )
                     elif bypass_recomputing_logprobs:  # Use `rollout_log_probs`
                         from verl.trainer.ppo.rollout_corr_helper import apply_bypass_mode
 
