@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compute exact per-step pass@k from saved rollout groups and plot curves."""
+"""Compute exact per-step pass@k for train and AIME24 rollout groups."""
 
 from __future__ import annotations
 
@@ -22,7 +22,19 @@ def parse_args() -> argparse.Namespace:
         "--run",
         action="append",
         required=True,
-        help="Run specification label::rollout_dir. Repeat for multiple runs or cuts.",
+        help="Plotted train-rollout specification label::rollout_dir. Repeat for multiple runs.",
+    )
+    parser.add_argument(
+        "--csv-only-run",
+        action="append",
+        default=[],
+        help="Auxiliary rollout specification label::rollout_dir. Compute it for CSV but do not plot it.",
+    )
+    parser.add_argument(
+        "--aime-run",
+        action="append",
+        default=[],
+        help="Plotted AIME24 validation specification label::validation_data_dir.",
     )
     parser.add_argument(
         "--k",
@@ -43,13 +55,13 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def parse_run_specs(values: list[str]) -> list[tuple[str, Path]]:
+def parse_run_specs(values: list[str], option: str) -> list[tuple[str, Path]]:
     specs = []
     labels = set()
     for value in values:
         parts = value.split("::", 1)
         if len(parts) != 2 or not all(parts):
-            raise ValueError(f"Invalid --run {value!r}; expected label::rollout_dir")
+            raise ValueError(f"Invalid {option} {value!r}; expected label::directory")
         label, directory = parts
         if label in labels:
             raise ValueError(f"Duplicate run label: {label!r}")
@@ -109,7 +121,14 @@ def exact_pass_at_k(num_samples: int, num_correct: int, k: int) -> float:
     return 1.0 - math.comb(num_wrong, k) / math.comb(num_samples, k)
 
 
-def summarize_step(path: Path, label: str, step: int, ks: tuple[int, ...]) -> dict[str, Any]:
+def summarize_step(
+    path: Path,
+    label: str,
+    step: int,
+    ks: tuple[int, ...],
+    dataset: str,
+    plotted: bool,
+) -> dict[str, Any]:
     rows = read_jsonl(path)
     if not rows:
         raise ValueError(f"Rollout file is empty: {path}")
@@ -128,6 +147,8 @@ def summarize_step(path: Path, label: str, step: int, ks: tuple[int, ...]) -> di
     modal_group_size = max(set(sizes), key=lambda size: (sizes.count(size), size))
     record: dict[str, Any] = {
         "run": label,
+        "dataset": dataset,
+        "plotted": plotted,
         "step": step,
         "rows": len(rows),
         "groups": len(groups),
@@ -145,7 +166,14 @@ def summarize_step(path: Path, label: str, step: int, ks: tuple[int, ...]) -> di
     return record
 
 
-def summarize_run(label: str, directory: Path, max_step: int | None, ks: tuple[int, ...]) -> pd.DataFrame:
+def summarize_run(
+    label: str,
+    directory: Path,
+    max_step: int | None,
+    ks: tuple[int, ...],
+    dataset: str,
+    plotted: bool,
+) -> pd.DataFrame:
     if not directory.is_dir():
         raise FileNotFoundError(f"Rollout directory does not exist: {directory}")
     paths = []
@@ -155,7 +183,36 @@ def summarize_run(label: str, directory: Path, max_step: int | None, ks: tuple[i
             paths.append((step, path))
     if not paths:
         raise FileNotFoundError(f"No numeric step JSONL files found under {directory}")
-    return pd.DataFrame(summarize_step(path, label, step, ks) for step, path in sorted(paths))
+    return pd.DataFrame(
+        summarize_step(path, label, step, ks, dataset, plotted) for step, path in sorted(paths)
+    )
+
+
+def validate_aime_groups(metrics: pd.DataFrame) -> None:
+    aime = metrics[metrics["dataset"] == "aime24_validation"]
+    if aime.empty:
+        return
+    invalid = aime[
+        (aime["groups"] != 30)
+        | (aime["group_size_min"] != 32)
+        | (aime["group_size_max"] != 32)
+        | (aime["nonmodal_groups"] != 0)
+    ]
+    if not invalid.empty:
+        columns = [
+            "run",
+            "step",
+            "rows",
+            "groups",
+            "group_size_min",
+            "group_size_max",
+            "nonmodal_groups",
+            "source",
+        ]
+        raise ValueError(
+            "AIME24 validation must regroup into exactly 30 problems with 32 trajectories each. "
+            "Invalid steps:\n" + invalid[columns].to_string(index=False)
+        )
 
 
 def plot_metrics(metrics: pd.DataFrame, output_path: Path, title: str, ks: tuple[int, ...]) -> None:
@@ -163,51 +220,94 @@ def plot_metrics(metrics: pd.DataFrame, output_path: Path, title: str, ks: tuple
     from matplotlib.ticker import PercentFormatter
 
     plt.style.use("seaborn-v0_8-whitegrid")
-    columns = 2
-    rows = math.ceil(len(ks) / columns)
-    fig, axes = plt.subplots(rows, columns, figsize=(13, 4.5 * rows), sharex=True, sharey=True, squeeze=False)
-    flat_axes = list(axes.flat)
-    for ax, k in zip(flat_axes, ks, strict=False):
-        metric = f"pass_at_{k}"
-        for label, frame in metrics.groupby("run", sort=False):
-            frame = frame.sort_values("step")
-            ax.plot(frame["step"], frame[metric], marker="o", linewidth=2, markersize=4, label=label)
-        ax.set_title(f"pass@{k}")
-        ax.set_xlabel("Global step")
-        ax.set_ylabel("Expected pass rate")
-        ax.yaxis.set_major_formatter(PercentFormatter(1.0))
-        ax.set_ylim(0.0, 1.0)
-        ax.grid(alpha=0.25)
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-    for ax in flat_axes[len(ks) :]:
-        ax.set_visible(False)
+    plotted = metrics[metrics["plotted"]]
+    datasets = [dataset for dataset in ("train_rollout", "aime24_validation") if dataset in set(plotted["dataset"])]
+    if not datasets:
+        raise ValueError("No plotted train or AIME24 runs were provided.")
 
-    handles, labels = flat_axes[0].get_legend_handles_labels()
-    fig.suptitle(title, y=0.985, fontsize=15)
+    fig, axes = plt.subplots(
+        len(datasets),
+        len(ks),
+        figsize=(4.2 * len(ks), 4.0 * len(datasets)),
+        sharex="col",
+        sharey=True,
+        squeeze=False,
+    )
+    row_titles = {
+        "train_rollout": "Train rollout",
+        "aime24_validation": "AIME24 validation",
+    }
+    for row, dataset in enumerate(datasets):
+        dataset_metrics = plotted[plotted["dataset"] == dataset]
+        for column, k in enumerate(ks):
+            ax = axes[row, column]
+            metric = f"pass_at_{k}"
+            for label, frame in dataset_metrics.groupby("run", sort=False):
+                frame = frame.sort_values("step")
+                ax.plot(
+                    frame["step"],
+                    frame[metric],
+                    marker="o",
+                    linewidth=2,
+                    markersize=4,
+                    label=label,
+                )
+            ax.set_title(f"{row_titles[dataset]} pass@{k}")
+            ax.set_xlabel("Global step")
+            if column == 0:
+                ax.set_ylabel("Expected pass rate")
+            ax.yaxis.set_major_formatter(PercentFormatter(1.0))
+            ax.set_ylim(0.0, 1.0)
+            ax.grid(alpha=0.25)
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+
+    handles_by_label = {}
+    for ax in axes.flat:
+        handles, labels = ax.get_legend_handles_labels()
+        handles_by_label.update(zip(labels, handles, strict=True))
+    labels = list(handles_by_label)
+    handles = [handles_by_label[label] for label in labels]
+    fig.suptitle(title, y=0.99, fontsize=15)
     fig.legend(
         handles,
         labels,
         loc="upper center",
-        ncol=min(3, max(1, len(labels))),
+        ncol=min(4, max(1, len(labels))),
         frameon=False,
-        bbox_to_anchor=(0.5, 0.94),
+        bbox_to_anchor=(0.5, 0.955),
     )
-    fig.tight_layout(rect=(0, 0, 1, 0.85))
+    fig.tight_layout(rect=(0, 0, 1, 0.89))
     fig.savefig(output_path, dpi=220, bbox_inches="tight")
     plt.close(fig)
 
 
 def main() -> None:
     args = parse_args()
-    specs = parse_run_specs(args.run)
-    metrics = pd.concat(
-        [summarize_run(label, directory, args.max_step, args.ks) for label, directory in specs],
-        ignore_index=True,
-    ).sort_values(["step", "run"])
+    train_specs = parse_run_specs(args.run, "--run")
+    csv_only_specs = parse_run_specs(args.csv_only_run, "--csv-only-run")
+    aime_specs = parse_run_specs(args.aime_run, "--aime-run")
+    frames = [
+        summarize_run(label, directory, args.max_step, args.ks, "train_rollout", True)
+        for label, directory in train_specs
+    ]
+    frames.extend(
+        summarize_run(label, directory, args.max_step, args.ks, "auxiliary_rollout", False)
+        for label, directory in csv_only_specs
+    )
+    frames.extend(
+        summarize_run(label, directory, args.max_step, args.ks, "aime24_validation", True)
+        for label, directory in aime_specs
+    )
+    metrics = pd.concat(frames, ignore_index=True).sort_values(["dataset", "step", "run"])
+    validate_aime_groups(metrics)
 
     pass_columns = [f"pass_at_{k}" for k in args.ks]
-    summary = metrics.groupby("run", sort=False)[pass_columns].agg(["count", "mean", "min", "max"]).reset_index()
+    summary = (
+        metrics.groupby(["dataset", "run"], sort=False)[pass_columns]
+        .agg(["count", "mean", "min", "max"])
+        .reset_index()
+    )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = args.output_dir / "rollout_group_pass_at_k_per_step.csv"
@@ -219,6 +319,8 @@ def main() -> None:
 
     display_columns = [
         "run",
+        "dataset",
+        "plotted",
         "step",
         "rows",
         "groups",

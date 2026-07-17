@@ -177,6 +177,7 @@ case "${MODE}" in
             trainer.val_before_train=False
             trainer.total_training_steps=${TOTAL_TRAINING_STEPS}
             trainer.rollout_data_dir="${ROLLOUT_DATA_DIR:-./rollout_data/${PROJECT_NAME}/${RUN_NAME}}"
+            trainer.validation_data_dir="${VALIDATION_DATA_DIR:-./validation_data/${PROJECT_NAME}/${RUN_NAME}}"
         )
         ;;
     eval)
@@ -191,6 +192,7 @@ case "${MODE}" in
             trainer.val_before_train=True
             trainer.val_only=True
             trainer.rollout_data_dir="${ROLLOUT_DATA_DIR:-./rollout_data/${PROJECT_NAME}/${RUN_NAME}_eval}"
+            trainer.validation_data_dir="${VALIDATION_DATA_DIR:-./validation_data/${PROJECT_NAME}/${RUN_NAME}_eval}"
         )
         ;;
     *)
