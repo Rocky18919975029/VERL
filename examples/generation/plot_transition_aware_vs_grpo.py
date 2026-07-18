@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Incrementally compare two transition-aware lambdas with GRPO baselines."""
+"""Compare two transition-aware lambdas with the n=32 vLLM-logprob GRPO baseline."""
 
 from __future__ import annotations
 
@@ -20,8 +20,6 @@ DEFAULT_LAMBDA1_PROJECT = Path("rollout_data/hpf_transition_aware_fulltail_k16_m
 DEFAULT_LAMBDA05_PROJECT = Path(
     "rollout_data/hpf_transition_aware_fulltail_k16_lambda0p5_mini1536_boxed_seed42"
 )
-DEFAULT_GRPO_PROJECT = Path("rollout_data/grpo_dapo_math17k_mini1536_boxed_n32_seed42")
-DEFAULT_GRPO_VLLM_N16_PROJECT = Path("rollout_data/grpo_vllm_logprob_mini1536_boxed_seed42")
 DEFAULT_GRPO_VLLM_PROJECT = Path("rollout_data/grpo_vllm_logprob_n32_mini1536_boxed_seed42")
 
 
@@ -49,10 +47,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lambda1-project-dir", type=Path, default=DEFAULT_LAMBDA1_PROJECT)
     parser.add_argument("--lambda05-run-dir", type=Path)
     parser.add_argument("--lambda05-project-dir", type=Path, default=DEFAULT_LAMBDA05_PROJECT)
-    parser.add_argument("--grpo-run-dir", type=Path)
-    parser.add_argument("--grpo-project-dir", type=Path, default=DEFAULT_GRPO_PROJECT)
-    parser.add_argument("--grpo-vllm-n16-run-dir", type=Path)
-    parser.add_argument("--grpo-vllm-n16-project-dir", type=Path, default=DEFAULT_GRPO_VLLM_N16_PROJECT)
     parser.add_argument("--grpo-vllm-run-dir", type=Path)
     parser.add_argument("--grpo-vllm-project-dir", type=Path, default=DEFAULT_GRPO_VLLM_PROJECT)
     parser.add_argument("--slurm-log-dir", type=Path, default=Path("."))
@@ -311,77 +305,27 @@ def main() -> None:
     else:
         print("WARNING: no complete lambda=0.5 run discovered")
 
-    grpo_dir = resolve_run(
-        args.grpo_run_dir,
-        args.grpo_project_dir,
-        paired=False,
-        label="GRPO n=32 (forward-recomputed behavior log-prob)",
-    )
-    if grpo_dir is not None:
-        specs.append(
-            RunSpec(
-                "GRPO n=32 (forward-recomputed behavior log-prob)",
-                grpo_dir,
-                "#238b45",
-                "^",
-                False,
-                16384,
-                "slurm-verl-resched-grpo",
-            )
-        )
-    else:
-        print(
-            "WARNING: no complete GRPO n=32 forward-recompute run discovered; "
-            "rerun after its first rollout dump"
-        )
-
-    grpo_vllm_n16_dir = resolve_run(
-        args.grpo_vllm_n16_run_dir,
-        args.grpo_vllm_n16_project_dir,
-        paired=False,
-        label="GRPO n=16 (vLLM behavior log-prob)",
-    )
-    if grpo_vllm_n16_dir is not None:
-        specs.append(
-            RunSpec(
-                "GRPO n=16 (vLLM behavior log-prob)",
-                grpo_vllm_n16_dir,
-                "#d17a00",
-                "v",
-                False,
-                8192,
-                "slurm-verl-resched-grpo",
-            )
-        )
-    else:
-        print(
-            "WARNING: no complete GRPO n=16 vLLM-logprob run discovered; "
-            "rerun after its first rollout dump"
-        )
-
     grpo_vllm_dir = resolve_run(
         args.grpo_vllm_run_dir,
         args.grpo_vllm_project_dir,
         paired=False,
         label="GRPO n=32 (vLLM behavior log-prob)",
     )
-    if grpo_vllm_dir is not None:
-        specs.append(
-            RunSpec(
-                "GRPO n=32 (vLLM behavior log-prob)",
-                grpo_vllm_dir,
-                "#7a3db8",
-                "D",
-                False,
-                16384,
-                "slurm-verl-resched-grpo",
-            )
+    if grpo_vllm_dir is None:
+        raise FileNotFoundError(
+            f"No complete GRPO n=32 vLLM-logprob run found under {args.grpo_vllm_project_dir}"
         )
-    else:
-        print(
-            "WARNING: no complete GRPO n=32 vLLM-logprob run discovered; "
-            "rerun after its first rollout dump"
+    specs.append(
+        RunSpec(
+            "GRPO n=32 (vLLM behavior log-prob)",
+            grpo_vllm_dir,
+            "#238b45",
+            "^",
+            False,
+            16384,
+            "slurm-verl-resched-grpo",
         )
+    )
 
     frames = []
     for spec in specs:
