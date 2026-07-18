@@ -22,7 +22,10 @@ def parse_args() -> argparse.Namespace:
         "--run",
         action="append",
         required=True,
-        help="Plotted train-rollout specification label::rollout_dir. Repeat for multiple runs.",
+        help=(
+            "Experiment specification label::rollout_run_dir. Numeric steps, transition_next, and "
+            "the matching validation_data directory are discovered automatically."
+        ),
     )
     parser.add_argument(
         "--csv-only-run",
@@ -68,6 +71,16 @@ def parse_run_specs(values: list[str], option: str) -> list[tuple[str, Path]]:
         labels.add(label)
         specs.append((label, Path(directory)))
     return specs
+
+
+def infer_validation_directory(rollout_directory: Path) -> Path | None:
+    parts = list(rollout_directory.parts)
+    try:
+        index = parts.index("rollout_data")
+    except ValueError:
+        return None
+    parts[index] = "validation_data"
+    return Path(*parts)
 
 
 def step_from_path(path: Path) -> int | None:
@@ -291,6 +304,40 @@ def main() -> None:
         summarize_run(label, directory, args.max_step, args.ks, "train_rollout", True)
         for label, directory in train_specs
     ]
+    explicit_csv_only_paths = {directory.resolve() for _, directory in csv_only_specs}
+    explicit_aime_paths = {directory.resolve() for _, directory in aime_specs}
+    for label, directory in train_specs:
+        next_directory = directory / "transition_next"
+        if next_directory.is_dir() and next_directory.resolve() not in explicit_csv_only_paths:
+            print(f"Auto-discovered CSV-only next cut: {label} -> {next_directory}")
+            frames.append(
+                summarize_run(
+                    f"{label} next",
+                    next_directory,
+                    args.max_step,
+                    args.ks,
+                    "auxiliary_rollout",
+                    False,
+                )
+            )
+
+        validation_directory = infer_validation_directory(directory)
+        if (
+            validation_directory is not None
+            and validation_directory.is_dir()
+            and validation_directory.resolve() not in explicit_aime_paths
+        ):
+            print(f"Auto-discovered AIME24 validation: {label} -> {validation_directory}")
+            frames.append(
+                summarize_run(
+                    label,
+                    validation_directory,
+                    args.max_step,
+                    args.ks,
+                    "aime24_validation",
+                    True,
+                )
+            )
     frames.extend(
         summarize_run(label, directory, args.max_step, args.ks, "auxiliary_rollout", False)
         for label, directory in csv_only_specs
