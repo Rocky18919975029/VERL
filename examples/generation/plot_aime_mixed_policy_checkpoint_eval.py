@@ -90,7 +90,12 @@ def source_metadata_candidates(source_data: pd.DataFrame) -> dict[str, pd.Series
         for column, value in row.items():
             flattened.update(flatten_scalar_metadata(value, str(column)))
         flattened_rows.append(flattened)
-    metadata = pd.DataFrame(flattened_rows, index=source_data.index)
+    if "original_row_index" not in source_data.columns:
+        raise ValueError("Source AIME data is missing original_row_index.")
+    metadata = pd.DataFrame(
+        flattened_rows,
+        index=source_data["original_row_index"].astype(int),
+    )
     return {column: metadata[column] for column in metadata.columns}
 
 
@@ -276,7 +281,9 @@ def main() -> None:
     data_path = Path(args.data)
     if not data_path.is_file():
         raise FileNotFoundError(f"Original AIME parquet does not exist: {data_path}")
-    source_data = pd.read_parquet(data_path).reset_index(drop=True)
+    # The parquet preserves indices from before filtering/shuffling. They are
+    # intentionally non-contiguous and are the IDs stored by the eval shards.
+    source_data = pd.read_parquet(data_path).reset_index(names="original_row_index")
 
     summaries = []
     problem_frames = []
