@@ -64,6 +64,56 @@ def load_step(path: Path) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True)
 
 
+def infer_problem_groups(
+    frame: pd.DataFrame,
+    expected_problems: int,
+    expected_samples: int,
+) -> tuple[pd.Series, str]:
+    """Recover dataset-level problem identity without merging duplicate items."""
+
+    def valid(candidate: pd.Series) -> bool:
+        grouped = frame.assign(_candidate=candidate).groupby("_candidate", sort=False)
+        sizes = grouped.size()
+        content_counts = grouped["problem_key"].nunique()
+        return bool(
+            len(sizes) == expected_problems
+            and sizes.eq(expected_samples).all()
+            and content_counts.eq(1).all()
+        )
+
+    content_groups = frame["problem_key"].astype(str)
+    if valid(content_groups):
+        return content_groups, "prompt_and_ground_truth"
+
+    if "original_row_index" not in frame.columns:
+        raise ValueError(
+            "Content grouping merged duplicate AIME items, but original_row_index is unavailable."
+        )
+    row_index = frame["original_row_index"].astype(int)
+    if row_index.nunique() != expected_problems * expected_samples:
+        raise ValueError(
+            "original_row_index is not unique and complete: "
+            f"unique={row_index.nunique()} expected={expected_problems * expected_samples}"
+        )
+
+    # Common construction 1: each problem is repeated N times before the next
+    # problem. Common construction 2: the complete problem set is repeated N
+    # times. Requiring one content key per inferred group prevents a silent,
+    # incorrect choice between the two layouts.
+    contiguous = row_index // expected_samples
+    if valid(contiguous):
+        return "row_block_" + contiguous.astype(str), "contiguous_repetitions"
+
+    strided = row_index % expected_problems
+    if valid(strided):
+        return "row_stride_" + strided.astype(str), "repeated_problem_set"
+
+    raise ValueError(
+        "Could not infer the AIME repetition layout. Neither content, contiguous-repeat, "
+        "nor repeated-problem-set grouping produced the expected problem structure."
+    )
+
+
 def summarize_step(
     step: int,
     frame: pd.DataFrame,
@@ -74,9 +124,17 @@ def summarize_step(
     missing = required - set(frame.columns)
     if missing:
         raise ValueError(f"Step {step} is missing columns: {sorted(missing)}")
+    problem_groups, grouping_strategy = infer_problem_groups(
+        frame, expected_problems, expected_samples
+    )
+    grouped_frame = frame.assign(aime_problem_id=problem_groups)
     per_problem = (
-        frame.groupby("problem_key", sort=True)["is_correct"]
-        .agg(num_correct="sum", num_samples="count")
+        grouped_frame.groupby("aime_problem_id", sort=True)
+        .agg(
+            problem_key=("problem_key", "first"),
+            num_correct=("is_correct", "sum"),
+            num_samples=("is_correct", "count"),
+        )
         .reset_index()
     )
     per_problem["num_correct"] = per_problem["num_correct"].astype(int)
@@ -104,6 +162,7 @@ def summarize_step(
         "problems": len(per_problem),
         "group_size_min": group_min,
         "group_size_max": group_max,
+        "grouping_strategy": grouping_strategy,
         "complete": complete,
         "trajectory_accuracy": float(frame["is_correct"].mean()),
         "num_correct": int(frame["is_correct"].sum()),
@@ -184,7 +243,7 @@ def main() -> None:
 
     summary_frame = pd.DataFrame(summaries).sort_values("step")
     per_problem_frame = pd.concat(problem_frames, ignore_index=True).sort_values(
-        ["step", "problem_key"]
+        ["step", "aime_problem_id"]
     )
     summary_frame.to_csv(output_dir / "aime_mixed_policy_summary.csv", index=False)
     per_problem_frame.to_csv(output_dir / "aime_mixed_policy_per_problem.csv", index=False)
