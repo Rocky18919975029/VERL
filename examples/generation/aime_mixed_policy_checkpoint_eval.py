@@ -45,10 +45,10 @@ def parse_args() -> argparse.Namespace:
 
 
 def to_builtin(value: Any) -> Any:
-    if hasattr(value, "item"):
-        return value.item()
     if hasattr(value, "tolist"):
         return to_builtin(value.tolist())
+    if hasattr(value, "item"):
+        return value.item()
     if isinstance(value, dict):
         return {str(key): to_builtin(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
@@ -60,6 +60,8 @@ def normalize_messages(prompt_value: Any) -> list[dict[str, str]]:
     prompt_value = to_builtin(prompt_value)
     if isinstance(prompt_value, str):
         return [{"role": "user", "content": prompt_value}]
+    if isinstance(prompt_value, dict):
+        prompt_value = [prompt_value]
     messages = []
     for message in prompt_value:
         if isinstance(message, dict):
@@ -80,6 +82,22 @@ def render_prompt(tokenizer: Any, prompt_value: Any) -> str:
         return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     except Exception:
         return "\n".join(message["content"] for message in messages)
+
+
+def validate_rendered_prompt(prompt_value: Any, rendered_prompt: str) -> None:
+    messages = normalize_messages(prompt_value)
+    if not messages or not any(message["content"].strip() for message in messages):
+        raise ValueError("AIME source row has no non-empty prompt message.")
+    missing = [
+        message["content"]
+        for message in messages
+        if message["content"].strip() and message["content"] not in rendered_prompt
+    ]
+    if missing:
+        raise ValueError(
+            "Rendered prompt does not contain all source message content; refusing to run evaluation. "
+            f"First missing content: {missing[0][:200]!r}"
+        )
 
 
 def make_token_prompt(prompt_token_ids: list[int]) -> Any:
@@ -150,7 +168,11 @@ def main() -> None:
     if args.limit is not None:
         data = data.head(args.limit)
     data = data.iloc[args.shard_index :: args.num_shards].reset_index(drop=True)
-    prompts = [render_prompt(tokenizer, row["prompt"]) for _, row in data.iterrows()]
+    prompts = []
+    for _, row in data.iterrows():
+        prompt = render_prompt(tokenizer, row["prompt"])
+        validate_rendered_prompt(row["prompt"], prompt)
+        prompts.append(prompt)
 
     llm = make_llm(args)
     prefix_params = make_sampling_params(
