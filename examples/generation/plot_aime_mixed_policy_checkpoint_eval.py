@@ -19,6 +19,11 @@ PASS_KS = (1, 4, 8, 16, 32)
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", required=True)
+    parser.add_argument(
+        "--data",
+        default="/data/user/zhongal/data/reschedule/aime24.parquet",
+        help="Original AIME parquet used for evaluation; needed to recover shuffled repeated problem IDs.",
+    )
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--expected-problems", type=int, default=30)
     parser.add_argument("--expected-samples-per-problem", type=int, default=32)
@@ -64,10 +69,36 @@ def load_step(path: Path) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True)
 
 
+def flatten_scalar_metadata(value: Any, prefix: str) -> dict[str, Any]:
+    if hasattr(value, "item"):
+        value = value.item()
+    if isinstance(value, dict):
+        flattened = {}
+        for key, item in value.items():
+            child_prefix = f"{prefix}.{key}" if prefix else str(key)
+            flattened.update(flatten_scalar_metadata(item, child_prefix))
+        return flattened
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return {prefix: value}
+    return {}
+
+
+def source_metadata_candidates(source_data: pd.DataFrame) -> dict[str, pd.Series]:
+    flattened_rows = []
+    for _, row in source_data.iterrows():
+        flattened = {}
+        for column, value in row.items():
+            flattened.update(flatten_scalar_metadata(value, str(column)))
+        flattened_rows.append(flattened)
+    metadata = pd.DataFrame(flattened_rows, index=source_data.index)
+    return {column: metadata[column] for column in metadata.columns}
+
+
 def infer_problem_groups(
     frame: pd.DataFrame,
     expected_problems: int,
     expected_samples: int,
+    source_data: pd.DataFrame | None,
 ) -> tuple[pd.Series, str]:
     """Recover dataset-level problem identity without merging duplicate items."""
 
@@ -96,6 +127,20 @@ def infer_problem_groups(
             f"unique={row_index.nunique()} expected={expected_problems * expected_samples}"
         )
 
+    if source_data is not None:
+        if len(source_data) != expected_problems * expected_samples:
+            raise ValueError(
+                f"Source AIME parquet has {len(source_data)} rows; "
+                f"expected {expected_problems * expected_samples}."
+            )
+        candidate_diagnostics = []
+        for field, source_candidate in source_metadata_candidates(source_data).items():
+            candidate = row_index.map(source_candidate)
+            counts = candidate.value_counts(dropna=False)
+            candidate_diagnostics.append((field, len(counts), int(counts.min()), int(counts.max())))
+            if valid(candidate):
+                return "source_" + candidate.astype(str), f"source_metadata:{field}"
+
     # Common construction 1: each problem is repeated N times before the next
     # problem. Common construction 2: the complete problem set is repeated N
     # times. Requiring one content key per inferred group prevents a silent,
@@ -108,9 +153,19 @@ def infer_problem_groups(
     if valid(strided):
         return "row_stride_" + strided.astype(str), "repeated_problem_set"
 
+    diagnostics = ""
+    if source_data is not None:
+        closest = sorted(
+            candidate_diagnostics,
+            key=lambda item: (abs(item[1] - expected_problems), abs(item[2] - expected_samples)),
+        )[:10]
+        diagnostics = " Closest source metadata fields: " + ", ".join(
+            f"{field}={unique} ids/{minimum}-{maximum}" for field, unique, minimum, maximum in closest
+        )
     raise ValueError(
         "Could not infer the AIME repetition layout. Neither content, contiguous-repeat, "
-        "nor repeated-problem-set grouping produced the expected problem structure."
+        "repeated-problem-set, nor source metadata grouping produced the expected problem structure."
+        + diagnostics
     )
 
 
@@ -119,13 +174,14 @@ def summarize_step(
     frame: pd.DataFrame,
     expected_problems: int,
     expected_samples: int,
+    source_data: pd.DataFrame | None = None,
 ) -> tuple[dict[str, Any], pd.DataFrame]:
     required = {"problem_key", "is_correct", "horizon"}
     missing = required - set(frame.columns)
     if missing:
         raise ValueError(f"Step {step} is missing columns: {sorted(missing)}")
     problem_groups, grouping_strategy = infer_problem_groups(
-        frame, expected_problems, expected_samples
+        frame, expected_problems, expected_samples, source_data
     )
     grouped_frame = frame.assign(aime_problem_id=problem_groups)
     per_problem = (
@@ -217,6 +273,10 @@ def main() -> None:
     root = Path(args.root)
     output_dir = Path(args.output_dir) if args.output_dir else root / "analysis"
     output_dir.mkdir(parents=True, exist_ok=True)
+    data_path = Path(args.data)
+    if not data_path.is_file():
+        raise FileNotFoundError(f"Original AIME parquet does not exist: {data_path}")
+    source_data = pd.read_parquet(data_path).reset_index(drop=True)
 
     summaries = []
     problem_frames = []
@@ -227,6 +287,7 @@ def main() -> None:
             load_step(path),
             args.expected_problems,
             args.expected_samples_per_problem,
+            source_data,
         )
         summaries.append(summary)
         problem_frames.append(per_problem)
