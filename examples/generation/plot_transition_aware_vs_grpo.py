@@ -21,6 +21,8 @@ DEFAULT_LAMBDA05_PROJECT = Path(
     "rollout_data/hpf_transition_aware_fulltail_k16_lambda0p5_mini1536_boxed_seed42"
 )
 DEFAULT_GRPO_VLLM_PROJECT = Path("rollout_data/grpo_vllm_logprob_n32_mini1536_boxed_seed42")
+DEFAULT_MIXED_EVAL_SEARCH_DIR = Path("outputs")
+MIXED_EVAL_SUMMARY_NAME = "aime_mixed_policy_summary.csv"
 
 
 @dataclass(frozen=True)
@@ -49,6 +51,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lambda05-project-dir", type=Path, default=DEFAULT_LAMBDA05_PROJECT)
     parser.add_argument("--grpo-vllm-run-dir", type=Path)
     parser.add_argument("--grpo-vllm-project-dir", type=Path, default=DEFAULT_GRPO_VLLM_PROJECT)
+    parser.add_argument(
+        "--lambda05-mixed-eval-summary",
+        type=Path,
+        help=(
+            "AIME mixed-policy checkpoint-eval summary CSV. Its pass_at_1 values replace "
+            "the lambda=0.5 online-validation curve."
+        ),
+    )
+    parser.add_argument(
+        "--mixed-eval-search-dir",
+        type=Path,
+        default=DEFAULT_MIXED_EVAL_SEARCH_DIR,
+        help="Directory searched for the most complete lambda=0.5 mixed-policy eval summary.",
+    )
     parser.add_argument("--slurm-log-dir", type=Path, default=Path("."))
     parser.add_argument(
         "--output-dir",
@@ -193,12 +209,87 @@ def attach_eval_metrics(frame: pd.DataFrame, spec: RunSpec, log_dir: Path) -> pd
     values = parse_eval_metrics(logs, set(frame["step"].astype(int)))
     result = frame.copy()
     result["eval_acc"] = result["step"].map(values)
+    result["eval_source"] = result["eval_acc"].notna().map(
+        {True: "online_validation", False: "missing"}
+    )
     print(
         f"{spec.label}: run={spec.run_name}, steps={result['step'].min()}-{result['step'].max()}, "
         f"logs={len(logs)}, eval_points={result['eval_acc'].notna().sum()}"
     )
     if not logs:
         print(f"WARNING: no Slurm logs found for {spec.run_name}")
+    return result
+
+
+def _mixed_eval_summary_rank(path: Path) -> tuple[int, int, float]:
+    try:
+        frame = pd.read_csv(path, usecols=["step", "pass_at_1"])
+        steps = pd.to_numeric(frame["step"], errors="coerce").dropna().astype(int)
+    except (OSError, ValueError, KeyError, pd.errors.ParserError):
+        return (0, 0, path.stat().st_mtime)
+    return (len(set(steps)), int(steps.max()) if len(steps) else 0, path.stat().st_mtime)
+
+
+def discover_mixed_eval_summary(search_dir: Path) -> Path | None:
+    if not search_dir.is_dir():
+        return None
+    candidates = [
+        path
+        for path in search_dir.glob(
+            f"lambda0p5_aime_mixed_policy_eval*/analysis/{MIXED_EVAL_SUMMARY_NAME}"
+        )
+        if path.is_file()
+    ]
+    return max(candidates, key=_mixed_eval_summary_rank) if candidates else None
+
+
+def resolve_mixed_eval_summary(explicit: Path | None, search_dir: Path) -> Path | None:
+    if explicit is not None:
+        if not explicit.is_file():
+            raise FileNotFoundError(f"Mixed-policy eval summary does not exist: {explicit}")
+        return explicit
+    return discover_mixed_eval_summary(search_dir)
+
+
+def attach_mixed_policy_pass_at_1(frame: pd.DataFrame, summary_path: Path) -> pd.DataFrame:
+    summary = pd.read_csv(summary_path)
+    required = {"step", "pass_at_1"}
+    missing = required - set(summary.columns)
+    if missing:
+        raise ValueError(f"Mixed-policy eval summary is missing columns: {sorted(missing)}")
+
+    if "complete" in summary.columns:
+        complete = summary["complete"]
+        if complete.dtype != bool:
+            complete = complete.astype(str).str.lower().isin({"true", "1", "yes"})
+        summary = summary[complete]
+
+    summary = summary[["step", "pass_at_1"]].copy()
+    summary["step"] = pd.to_numeric(summary["step"], errors="raise").astype(int)
+    summary["pass_at_1"] = pd.to_numeric(summary["pass_at_1"], errors="raise")
+    if summary["step"].duplicated().any():
+        duplicates = sorted(summary.loc[summary["step"].duplicated(), "step"].unique())
+        raise ValueError(f"Mixed-policy eval summary has duplicate steps: {duplicates}")
+    if not summary["pass_at_1"].between(0.0, 1.0).all():
+        raise ValueError("Mixed-policy pass_at_1 values must be within [0, 1].")
+
+    values = summary.set_index("step")["pass_at_1"].to_dict()
+    result = frame.copy()
+    # Do not silently join two evaluation policies into one curve. When this
+    # summary is selected, lambda=0.5 is plotted only from mixed-policy evals.
+    result["eval_acc"] = result["step"].map(values)
+    result["eval_source"] = result["eval_acc"].notna().map(
+        {True: "mixed_policy_checkpoint_pass_at_1", False: "missing"}
+    )
+    matched = int(result["eval_acc"].notna().sum())
+    print(
+        f"lambda=0.5 mixed-policy AIME pass@1: summary={summary_path}, "
+        f"matched_steps={matched}/{len(result)}"
+    )
+    if matched == 0:
+        raise ValueError(
+            "Mixed-policy eval summary has no steps in common with the lambda=0.5 rollout run."
+        )
     return result
 
 
@@ -235,7 +326,7 @@ def make_plot(metrics: pd.DataFrame, specs: list[RunSpec], output_dir: Path) -> 
         )
 
     max_step = int(metrics["step"].max())
-    for ax, title in zip(axes, ["Train rollout accuracy", "AIME24 validation accuracy"]):
+    for ax, title in zip(axes, ["Train rollout accuracy", "AIME24 evaluation accuracy / pass@1"]):
         ax.set_title(title, fontsize=14)
         ax.set_xlabel("Global step")
         ax.set_ylabel("Accuracy")
@@ -328,9 +419,21 @@ def main() -> None:
     )
 
     frames = []
+    mixed_eval_summary = resolve_mixed_eval_summary(
+        args.lambda05_mixed_eval_summary,
+        args.mixed_eval_search_dir,
+    )
+    if mixed_eval_summary is None:
+        print(
+            "WARNING: no lambda=0.5 mixed-policy eval summary found; "
+            "using its online validation metrics"
+        )
     for spec in specs:
         frame = summarize_rollouts(spec, args.max_step)
-        frames.append(attach_eval_metrics(frame, spec, args.slurm_log_dir))
+        frame = attach_eval_metrics(frame, spec, args.slurm_log_dir)
+        if spec.label == "lambda=0.5" and mixed_eval_summary is not None:
+            frame = attach_mixed_policy_pass_at_1(frame, mixed_eval_summary)
+        frames.append(frame)
     metrics = pd.concat(frames, ignore_index=True)
     order = {spec.label: index for index, spec in enumerate(specs)}
     metrics["run_order"] = metrics["run"].map(order)
